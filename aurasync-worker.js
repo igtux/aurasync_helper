@@ -49,6 +49,7 @@ function parseArgs() {
     else if (a === '--no-hw') out.noHw = true;
     else if (a === '--title') out.titleId = argv[++i];
     else if (a === '--episode') out.episodeId = argv[++i];
+    else if (a === '--season') out.season = Number(argv[++i]);
     else if (a === '--port') out.port = Number(argv[++i]);
     else if (a === '--inbox') out.inbox = argv[++i];
     else if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
@@ -249,6 +250,8 @@ function makeApi(cfg) {
     // v2: fetch a title's full episode list so we can (a) ingest episodes
     // without a pending request and (b) decode absolute-episode numbers.
     listEpisodes: (titleId) => call('GET', `/api/workers/titles/${encodeURIComponent(titleId)}/episodes`),
+    // All titles in the catalogue, for the GUI's title-scope dropdown.
+    listTitles: (status) => call('GET', '/api/workers/titles' + (status ? `?status=${encodeURIComponent(status)}` : '')),
   };
 }
 
@@ -955,7 +958,7 @@ function renderScanSummary(matches, rootDir, mode) {
  * absolute-episode decoding). Otherwise we match against the server's
  * pending-request list (v1 mode).
  */
-async function buildFolderMatches(api, folder, titleId) {
+async function buildFolderMatches(api, folder, titleId, seasonFilter) {
   const abs = path.resolve(folder);
   if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
     throw new Error(`Not a directory: ${abs}`);
@@ -968,9 +971,18 @@ async function buildFolderMatches(api, folder, titleId) {
     let listRes;
     try { listRes = await api.listEpisodes(titleId); }
     catch (e) { throw new Error(`Could not fetch episodes for title ${titleId}: ${e.message}`); }
-    const episodes = listRes.episodes || [];
+    let episodes = listRes.episodes || [];
     if (episodes.length === 0) {
       throw new Error(`Title ${titleId} has no episodes synced. Run "Sync from TMDB" on its title page first.`);
+    }
+    const fullEpisodeCount = episodes.length;
+    // Optional season filter: scope matches to one season only.
+    if (seasonFilter != null && Number.isFinite(Number(seasonFilter))) {
+      const s = Number(seasonFilter);
+      episodes = episodes.filter((e) => e.season === s);
+      if (episodes.length === 0) {
+        throw new Error(`Title has no episodes in season ${s}.`);
+      }
     }
     const title = { id: titleId, title: listRes.titleTitle || '(unknown)' };
     // Max episodes-per-season decides when a bare number is definitely absolute.
@@ -980,7 +992,10 @@ async function buildFolderMatches(api, folder, titleId) {
     }
     const maxPerSeason = Math.max(...perSeasonCounts.values(), 0);
     const matches = files.map((f) => matchFileToTitleEpisode(f, abs, title, episodes, maxPerSeason));
-    return { abs, mode: `title-scope (${title.title}, ${episodes.length} eps)`, matches };
+    const modeLabel = seasonFilter != null
+      ? `title-scope (${title.title} · S${seasonFilter}, ${episodes.length} eps)`
+      : `title-scope (${title.title}, ${fullEpisodeCount} eps)`;
+    return { abs, mode: modeLabel, matches };
   }
 
   // v1: match against pending requests.
@@ -990,21 +1005,21 @@ async function buildFolderMatches(api, folder, titleId) {
   return { abs, mode: `pending-requests (${pending.length} open)`, matches };
 }
 
-async function cmdScan(api, folder, titleId) {
+async function cmdScan(api, folder, titleId, season) {
   if (!folder) {
-    console.error('Missing folder. Usage: aurasync-worker scan <folder> [--title <uuid>]');
+    console.error('Missing folder. Usage: aurasync-worker scan <folder> [--title <uuid>] [--season <n>]');
     process.exit(2);
   }
   let result;
-  try { result = await buildFolderMatches(api, folder, titleId); }
+  try { result = await buildFolderMatches(api, folder, titleId, season); }
   catch (e) { console.error(e.message); process.exit(2); }
   if (result.mode === 'empty') { console.log(`No video files found in ${result.abs}.`); return; }
   renderScanSummary(result.matches, result.abs, result.mode);
 }
 
-async function cmdIngestFolder(api, cfg, caps, folder, titleId) {
+async function cmdIngestFolder(api, cfg, caps, folder, titleId, season) {
   if (!folder) {
-    console.error('Missing folder. Usage: aurasync-worker ingest-folder <folder> [--title <uuid>]');
+    console.error('Missing folder. Usage: aurasync-worker ingest-folder <folder> [--title <uuid>] [--season <n>]');
     process.exit(2);
   }
   // Register so the server sees us online.
@@ -1012,7 +1027,7 @@ async function cmdIngestFolder(api, cfg, caps, folder, titleId) {
   catch (e) { console.error(`register failed: ${e.message}`); process.exit(3); }
 
   let result;
-  try { result = await buildFolderMatches(api, folder, titleId); }
+  try { result = await buildFolderMatches(api, folder, titleId, season); }
   catch (e) { console.error(e.message); process.exit(2); }
   if (result.mode === 'empty') { console.log(`No video files found in ${result.abs}.`); return; }
   renderScanSummary(result.matches, result.abs, result.mode);
@@ -1507,8 +1522,16 @@ section.pane {
       <div class="folder-controls">
         <label>Folder path</label>
         <input id="folder-path" placeholder="C:\\TV\\The Big Bang Theory" />
-        <label>Title scope (optional)</label>
-        <select id="folder-title"><option value="">— any pending request —</option></select>
+        <div style="display:grid;grid-template-columns:1fr 180px;gap:10px;">
+          <div>
+            <label>Title scope</label>
+            <select id="folder-title" style="width:100%;"><option value="">— any pending request —</option></select>
+          </div>
+          <div>
+            <label>Season</label>
+            <select id="folder-season" style="width:100%;" disabled><option value="">— all seasons —</option></select>
+          </div>
+        </div>
         <div class="folder-actions">
           <button id="folder-scan" class="btn">Scan</button>
           <button id="folder-ingest" class="btn primary" disabled>Ingest matched →</button>
@@ -1590,6 +1613,7 @@ section.pane {
     folder: {
       path: '',
       titleId: '',
+      season: '',
       scanning: false,
       matches: [],
       mode: '',
@@ -1916,26 +1940,79 @@ section.pane {
         t.classList.toggle('active', t.dataset.tab === name));
       $('tab-files').hidden = name !== 'files';
       $('tab-folder').hidden = name !== 'folder';
-      if (name === 'folder' && state.requests.length === 0) {
-        // surface pending-request titles in the scope dropdown lazily
-        void loadRequests();
-      }
-      if (name === 'folder') populateTitleScope();
+      if (name === 'folder') void populateTitleScope();
     });
   });
 
-  function populateTitleScope() {
+  // Cached — fetched once on first folder-tab entry, refreshed when user
+  // hits the refresh button inside the folder pane.
+  let allTitlesCache = null;
+  async function populateTitleScope() {
     const sel = $('folder-title');
     const curVal = sel.value;
-    const seen = new Map();
-    for (const r of state.requests) {
-      if (r.titleId && !seen.has(r.titleId)) seen.set(r.titleId, r.titleTitle || r.titleId.slice(0, 8));
+    if (!allTitlesCache) {
+      try {
+        const r = await api('/api/titles');
+        allTitlesCache = r.titles || [];
+      } catch {
+        allTitlesCache = [];
+      }
     }
+    // Group by series-like vs movie
+    const series = allTitlesCache.filter((t) => t.tmdbType === 'tv' || t.tmdbType === 'anime');
+    const movies = allTitlesCache.filter((t) => t.tmdbType === 'movie');
+    const other = allTitlesCache.filter((t) => t.tmdbType !== 'tv' && t.tmdbType !== 'anime' && t.tmdbType !== 'movie');
+    const opt = (t) => '<option value="' + esc(t.id) + '">' + esc(t.title) + (t.year ? ' (' + t.year + ')' : '') + '</option>';
+    const optgroup = (label, items) => items.length
+      ? '<optgroup label="' + esc(label) + '">' + items.map(opt).join('') + '</optgroup>' : '';
     sel.innerHTML = '<option value="">— any pending request —</option>' +
-      Array.from(seen.entries()).map(([id, name]) =>
-        '<option value="' + esc(id) + '">' + esc(name) + '</option>'
+      optgroup('Series & Anime', series) +
+      optgroup('Movies', movies) +
+      optgroup('Other', other);
+    if (curVal && allTitlesCache.some((t) => t.id === curVal)) sel.value = curVal;
+    // Repopulate Season dropdown based on currently-selected title.
+    await populateSeasonScope();
+  }
+
+  // When a title is picked, fetch its episodes, compute unique seasons,
+  // populate the Season dropdown. No title = disable season dropdown.
+  let episodesCache = new Map(); // titleId → episodes[]
+  async function populateSeasonScope() {
+    const titleSel = $('folder-title');
+    const seasonSel = $('folder-season');
+    const titleId = titleSel.value;
+    const curSeason = seasonSel.value;
+    if (!titleId) {
+      seasonSel.innerHTML = '<option value="">— all seasons —</option>';
+      seasonSel.disabled = true;
+      return;
+    }
+    let episodes = episodesCache.get(titleId);
+    if (!episodes) {
+      try {
+        const r = await api('/api/title-episodes?id=' + encodeURIComponent(titleId));
+        episodes = r.episodes || [];
+        episodesCache.set(titleId, episodes);
+      } catch {
+        episodes = [];
+      }
+    }
+    if (episodes.length === 0) {
+      seasonSel.innerHTML = '<option value="">— no episodes synced —</option>';
+      seasonSel.disabled = true;
+      return;
+    }
+    const seasonCounts = new Map();
+    for (const e of episodes) {
+      seasonCounts.set(e.season, (seasonCounts.get(e.season) || 0) + 1);
+    }
+    const sortedSeasons = Array.from(seasonCounts.keys()).sort((a, b) => a - b);
+    seasonSel.innerHTML = '<option value="">— all seasons (' + episodes.length + ' eps) —</option>' +
+      sortedSeasons.map((s) =>
+        '<option value="' + s + '">Season ' + s + ' · ' + seasonCounts.get(s) + ' eps</option>'
       ).join('');
-    if (curVal && seen.has(curVal)) sel.value = curVal;
+    seasonSel.disabled = false;
+    if (curSeason && seasonCounts.has(Number(curSeason))) seasonSel.value = curSeason;
   }
 
   async function folderScan() {
@@ -1943,16 +2020,19 @@ section.pane {
     if (!p) return;
     state.folder.path = p;
     state.folder.titleId = $('folder-title').value || '';
+    state.folder.season = $('folder-season').value || '';
     state.folder.scanning = true;
     $('folder-scan').disabled = true;
     $('folder-ingest').disabled = true;
     $('folder-summary').innerHTML = 'Scanning…';
     $('folder-results').innerHTML = '';
     try {
+      const body = { folder: p, titleId: state.folder.titleId || null };
+      if (state.folder.season !== '') body.season = Number(state.folder.season);
       const r = await api('/api/folder-scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folder: p, titleId: state.folder.titleId || null }),
+        body: JSON.stringify(body),
       });
       state.folder.matches = r.matches || [];
       state.folder.mode = r.mode || '';
@@ -1990,8 +2070,8 @@ section.pane {
         ? (esc(m.titleTitle || '') + (m.episodeName ? ' · ' + esc(m.episodeName) : ''))
         : esc(m.reason || '');
       return '<div class="row ' + cls + '">' +
-        '<div class="file">' + esc(m.file.rel) + '</div>' +
-        '<div class="meta">' + tag + meta + '</div>' +
+        '<div class="file-line">' + esc(m.file.rel) + '</div>' +
+        '<div class="meta-line">' + tag + ' ' + meta + '</div>' +
         '</div>';
     }).join('');
   }
@@ -2003,12 +2083,13 @@ section.pane {
     state.folder.ingesting = true;
     state.ingestRunning = true;
     $('folder-ingest').disabled = true;
-    // Kick off, then let the poll + activity panel do the rest.
     try {
+      const body = { folder: state.folder.path, titleId: state.folder.titleId || null };
+      if (state.folder.season !== '' && state.folder.season != null) body.season = Number(state.folder.season);
       await api('/api/folder-ingest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folder: state.folder.path, titleId: state.folder.titleId || null }),
+        body: JSON.stringify(body),
       });
       pollStatus();
     } catch (e) {
@@ -2020,7 +2101,13 @@ section.pane {
 
   $('folder-scan').onclick = folderScan;
   $('folder-ingest').onclick = folderIngest;
-  $('folder-title').addEventListener('change', () => { state.folder.titleId = $('folder-title').value || ''; });
+  $('folder-title').addEventListener('change', () => {
+    state.folder.titleId = $('folder-title').value || '';
+    void populateSeasonScope();
+  });
+  $('folder-season').addEventListener('change', () => {
+    state.folder.season = $('folder-season').value || '';
+  });
 
   // Initial load + polling.
   loadRequests();
@@ -2189,9 +2276,9 @@ async function runGuiIngestJob(api, cfg, caps, filePath, titleId, episodeId, tit
  * each file so the GUI's progress overlay shows overall queue progress
  * (N/M files) alongside the current file's transcode + upload %.
  */
-async function runGuiFolderIngest(api, cfg, caps, folder, titleId) {
+async function runGuiFolderIngest(api, cfg, caps, folder, titleId, season) {
   let result;
-  try { result = await buildFolderMatches(api, folder, titleId); }
+  try { result = await buildFolderMatches(api, folder, titleId, season); }
   catch (e) {
     ingestState.active = true;
     ingestState.phase = 'error';
@@ -2419,13 +2506,38 @@ async function cmdGui(api, cfg, caps) {
         sendJson(res, 200, { ok: true });
         return;
       }
+      if (req.method === 'GET' && req.url === '/api/titles') {
+        // Proxy to server so the GUI dropdown can list every title, not just
+        // ones with pending requests.
+        try {
+          const r = await api.listTitles();
+          sendJson(res, 200, r);
+        } catch (e) {
+          sendJson(res, 500, { error: e.message });
+        }
+        return;
+      }
+      if (req.method === 'GET' && req.url.startsWith('/api/title-episodes')) {
+        // /api/title-episodes?id=<uuid> — for populating the Season dropdown
+        const urlObj = new URL(req.url, 'http://x');
+        const id = urlObj.searchParams.get('id');
+        if (!id) { sendJson(res, 400, { error: 'missing id' }); return; }
+        try {
+          const r = await api.listEpisodes(id);
+          sendJson(res, 200, r);
+        } catch (e) {
+          sendJson(res, 500, { error: e.message });
+        }
+        return;
+      }
       if (req.method === 'POST' && req.url === '/api/folder-scan') {
         const body = await readJsonBody(req);
         const folder = String(body.folder || '').trim();
         const scopeTitleId = body.titleId ? String(body.titleId) : null;
+        const season = body.season != null ? Number(body.season) : null;
         if (!folder) { sendJson(res, 400, { error: 'missing folder' }); return; }
         try {
-          const result = await buildFolderMatches(api, folder, scopeTitleId);
+          const result = await buildFolderMatches(api, folder, scopeTitleId, season);
           sendJson(res, 200, {
             abs: result.abs,
             mode: result.mode,
@@ -2441,11 +2553,9 @@ async function cmdGui(api, cfg, caps) {
         const body = await readJsonBody(req);
         const folder = String(body.folder || '').trim();
         const scopeTitleId = body.titleId ? String(body.titleId) : null;
+        const season = body.season != null ? Number(body.season) : null;
         if (!folder) { sendJson(res, 400, { error: 'missing folder' }); return; }
-        // Kick off the queue in the background; ingestState is updated as
-        // each file runs so /api/state shows progress the same way single-
-        // file ingests do. The client polls /api/state until phase === 'done'.
-        runGuiFolderIngest(api, cfg, caps, folder, scopeTitleId)
+        runGuiFolderIngest(api, cfg, caps, folder, scopeTitleId, season)
           .catch((e) => { ingestState.phase = 'error'; ingestState.error = e.message; ingestState.active = false; });
         sendJson(res, 202, { accepted: true });
         return;
@@ -2520,12 +2630,12 @@ async function main() {
   }
   if (sub === 'scan') {
     const folder = args.positional[1];
-    await cmdScan(api, folder, args.titleId);
+    await cmdScan(api, folder, args.titleId, args.season);
     process.exit(0);
   }
   if (sub === 'ingest-folder') {
     const folder = args.positional[1];
-    await cmdIngestFolder(api, cfg, caps, folder, args.titleId);
+    await cmdIngestFolder(api, cfg, caps, folder, args.titleId, args.season);
     process.exit(0);
   }
   if (sub === 'gui') {
