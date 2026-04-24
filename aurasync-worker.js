@@ -290,12 +290,13 @@ function ffprobeDurationSec(cfg, srcPath) {
   }
 }
 
-// Shared tail: HLS muxer output. Same for every encoder branch below.
+// Shared tail: HLS muxer output. One variant (1080p) → one master + one media
+// playlist. We keep the master + v1080p/ layout even for a single rendition
+// so the server-side playlist rewriter doesn't need to special-case it.
 function hlsMuxerTail(outDir) {
   return [
     '-g', '48', '-keyint_min', '48',
-    '-c:a', 'aac', '-ar', '48000',
-    '-b:a:0', '96k', '-b:a:1', '128k', '-b:a:2', '128k',
+    '-c:a', 'aac', '-ar', '48000', '-b:a', '128k',
     '-f', 'hls',
     '-hls_time', '6',
     '-hls_playlist_type', 'vod',
@@ -303,26 +304,30 @@ function hlsMuxerTail(outDir) {
     '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', path.join(outDir, 'v%v', 'seg_%05d.ts'),
     '-master_pl_name', 'master.m3u8',
-    '-var_stream_map', 'v:0,a:0,name:480p v:1,a:1,name:720p v:2,a:2,name:1080p',
+    '-var_stream_map', 'v:0,a:0,name:1080p',
     path.join(outDir, 'v%v', 'index.m3u8'),
   ];
 }
 
 /**
- * Fully-GPU pipeline for NVENC: decode → split → 3× scale_cuda → encode.
+ * Fully-GPU pipeline for NVENC at 1080p: decode → scale_cuda → encode.
  * Frames never leave VRAM. On a consumer GPU (RTX 3080 / 4070 class) this
  * runs 3-5× faster than the PCIe-bouncing path because:
  *
  *   - without `-hwaccel_output_format cuda`, ffmpeg copies each decoded
- *     frame to host RAM, does 3× CPU swscale, then uploads 3× to NVENC.
- *     CPU + PCIe are the bottleneck even though NVENC itself is idle.
+ *     frame to host RAM, does CPU swscale, then uploads to NVENC. CPU +
+ *     PCIe are the bottleneck even though NVENC itself is idle.
  *
  *   - WITH cuda output format + scale_cuda, the surface never touches
  *     host memory. NVENC consumes CUDA frames directly.
  *
- * Requires ffmpeg built with both CUDA and the scale_cuda filter (Gyan's
- * Windows "essentials" + "full" builds both have it; the static Linux
- * builds shipped by johnvansickle do too).
+ * Output is 1080p height-clamped preserving aspect ratio (`-2` keeps width
+ * even-divisible). Sources smaller than 1080p are upscaled — that's rare
+ * and transient (admins don't usually fulfil with 720p sources).
+ *
+ * Requires ffmpeg built with CUDA + scale_cuda. Gyan's Windows
+ * "essentials" and "full" builds both include it, as do the static Linux
+ * builds shipped by johnvansickle.
  */
 function buildNvencArgs(srcPath, outDir) {
   return [
@@ -335,22 +340,13 @@ function buildNvencArgs(srcPath, outDir) {
 
     '-i', srcPath,
 
-    // One decode → fan out to 3 scalers on-GPU.
-    '-filter_complex',
-    '[0:v]split=3[v0][v1][v2];' +
-    '[v0]scale_cuda=854:480[o0];' +
-    '[v1]scale_cuda=1280:720[o1];' +
-    '[v2]scale_cuda=1920:1080[o2]',
-
-    '-map', '[o0]', '-map', '[o1]', '-map', '[o2]',
-    '-map', '0:a:0?', '-map', '0:a:0?', '-map', '0:a:0?',
+    '-vf', 'scale_cuda=1920:-2',  // single on-GPU scale; no PCIe round-trip
+    '-map', '0:v:0', '-map', '0:a:0?',
 
     '-c:v', 'h264_nvenc',
     '-preset', 'p4',           // p1 fastest .. p7 slowest. p4 balances well.
     '-rc', 'vbr',
-    '-b:v:0', '800k',  '-maxrate:v:0', '856k',  '-bufsize:v:0', '1200k',
-    '-b:v:1', '2500k', '-maxrate:v:1', '2675k', '-bufsize:v:1', '3750k',
-    '-b:v:2', '5000k', '-maxrate:v:2', '5350k', '-bufsize:v:2', '7500k',
+    '-b:v', '5000k', '-maxrate', '5350k', '-bufsize', '7500k',
 
     ...hlsMuxerTail(outDir),
   ];
@@ -367,20 +363,12 @@ function buildQsvArgs(srcPath, outDir) {
 
     '-i', srcPath,
 
-    '-filter_complex',
-    '[0:v]split=3[v0][v1][v2];' +
-    '[v0]scale_qsv=854:480[o0];' +
-    '[v1]scale_qsv=1280:720[o1];' +
-    '[v2]scale_qsv=1920:1080[o2]',
-
-    '-map', '[o0]', '-map', '[o1]', '-map', '[o2]',
-    '-map', '0:a:0?', '-map', '0:a:0?', '-map', '0:a:0?',
+    '-vf', 'scale_qsv=1920:-2',
+    '-map', '0:v:0', '-map', '0:a:0?',
 
     '-c:v', 'h264_qsv',
     '-preset', 'veryfast',
-    '-b:v:0', '800k',  '-maxrate:v:0', '856k',  '-bufsize:v:0', '1200k',
-    '-b:v:1', '2500k', '-maxrate:v:1', '2675k', '-bufsize:v:1', '3750k',
-    '-b:v:2', '5000k', '-maxrate:v:2', '5350k', '-bufsize:v:2', '7500k',
+    '-b:v', '5000k', '-maxrate', '5350k', '-bufsize', '7500k',
 
     ...hlsMuxerTail(outDir),
   ];
@@ -388,9 +376,9 @@ function buildQsvArgs(srcPath, outDir) {
 
 /**
  * Fallback software pipeline — used for libx264, h264_amf, h264_videotoolbox,
- * and anywhere the GPU-resident filters aren't available. Does CPU scaling
- * via swscale (-s:v:N); for h264_amf/h264_videotoolbox this still benefits
- * from GPU encoding, just loses the zero-copy scale win.
+ * and anywhere the GPU-resident filters aren't available. swscale on CPU,
+ * encoder as chosen. h264_amf / h264_videotoolbox still benefit from the
+ * GPU encode; just no zero-copy scale.
  */
 function buildSoftwareScaleArgs(srcPath, outDir, enc) {
   const isSw = enc === 'libx264';
@@ -401,8 +389,8 @@ function buildSoftwareScaleArgs(srcPath, outDir, enc) {
     '-y', '-hide_banner', '-loglevel', 'error',
     '-progress', 'pipe:2', '-nostats',
     '-i', srcPath,
-    '-map', '0:v:0', '-map', '0:v:0', '-map', '0:v:0',
-    '-map', '0:a:0?', '-map', '0:a:0?', '-map', '0:a:0?',
+    '-vf', 'scale=1920:-2',
+    '-map', '0:v:0', '-map', '0:a:0?',
     '-c:v', enc,
   ];
   if (preset) args.push('-preset', preset);
@@ -410,9 +398,7 @@ function buildSoftwareScaleArgs(srcPath, outDir, enc) {
   args.push(
     '-pix_fmt', 'yuv420p',
     '-sc_threshold', '0',
-    '-s:v:0', '854x480',   '-b:v:0', '800k',  '-maxrate:v:0', '856k',  '-bufsize:v:0', '1200k',
-    '-s:v:1', '1280x720',  '-b:v:1', '2500k', '-maxrate:v:1', '2675k', '-bufsize:v:1', '3750k',
-    '-s:v:2', '1920x1080', '-b:v:2', '5000k', '-maxrate:v:2', '5350k', '-bufsize:v:2', '7500k',
+    '-b:v', '5000k', '-maxrate', '5350k', '-bufsize', '7500k',
     ...hlsMuxerTail(outDir),
   );
   return args;
@@ -505,6 +491,39 @@ function walkFiles(dir) {
   return out;
 }
 
+/**
+ * Upload every file under `hlsDir` to R2 using a bounded-concurrency pool.
+ * Previously this loop was serial — at ~100 ms per round-trip that caps
+ * throughput at ~6 Mbit/s regardless of link speed (one small segment per
+ * RTT). With 12 in flight we saturate link bandwidth on anything up to
+ * gigabit. Progress is tallied atomically as workers resolve.
+ *
+ * Env override: AURASYNC_UPLOAD_CONCURRENCY (default 12, clamp 1..32).
+ */
+async function uploadHlsTree(api, jobId, hlsDir, onProgress) {
+  const files = walkFiles(hlsDir);
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+  const concurrency = clamp(Number(process.env.AURASYNC_UPLOAD_CONCURRENCY) || 12, 1, 32);
+  const n = Math.min(concurrency, files.length || 1);
+  let cursor = 0;
+  let done = 0;
+  let totalBytes = 0;
+  async function runner() {
+    while (true) {
+      const i = cursor++;
+      if (i >= files.length) return;
+      const abs = files[i];
+      const rel = path.relative(hlsDir, abs).split(path.sep).join('/');
+      const { bytes } = await uploadFile(api, jobId, abs, rel);
+      totalBytes += bytes;
+      done += 1;
+      if (onProgress) { try { onProgress(done, files.length, totalBytes); } catch {} }
+    }
+  }
+  await Promise.all(Array.from({ length: n }, () => runner()));
+  return { totalBytes, fileCount: files.length };
+}
+
 // ---------- one-job runner ----------
 
 async function runOneJob(api, cfg, job, caps) {
@@ -515,7 +534,7 @@ async function runOneJob(api, cfg, job, caps) {
   const srcPath = path.join(workDir, 'src' + srcExt);
   const hlsDir = path.join(workDir, 'hls');
   fs.mkdirSync(hlsDir, { recursive: true });
-  for (const v of ['v480p', 'v720p', 'v1080p']) {
+  for (const v of ['v1080p']) {
     fs.mkdirSync(path.join(hlsDir, v), { recursive: true });
   }
 
@@ -536,18 +555,12 @@ async function runOneJob(api, cfg, job, caps) {
     api.progress(jobId, overall).catch(() => {});
   });
 
-  // 3. Upload everything under hlsDir → keyPrefix/<relative>
-  const files = walkFiles(hlsDir);
-  log(`uploading ${files.length} HLS files`);
-  let totalBytes = 0;
-  for (let i = 0; i < files.length; i++) {
-    const abs = files[i];
-    const rel = path.relative(hlsDir, abs).split(path.sep).join('/');
-    const { bytes } = await uploadFile(api, jobId, abs, rel);
-    totalBytes += bytes;
-    const pct = 0.90 + ((i + 1) / files.length) * 0.10;
+  // 3. Upload everything under hlsDir → keyPrefix/<relative>, 12-way parallel.
+  log(`uploading HLS tree (parallel)`);
+  const { totalBytes, fileCount } = await uploadHlsTree(api, jobId, hlsDir, (done, total) => {
+    const pct = 0.90 + (done / total) * 0.10;
     api.progress(jobId, Math.min(0.99, pct)).catch(() => {});
-  }
+  });
 
   // 4. Tell server we're done → it flips the title to available.
   await api.complete(jobId, { durationSec, bytes: totalBytes });
@@ -555,7 +568,7 @@ async function runOneJob(api, cfg, job, caps) {
   // 5. Clean up temp files.
   try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
 
-  log(`job ${jobId.slice(0, 8)} complete (${files.length} files, ${(totalBytes / 1024 / 1024).toFixed(1)} MB)`);
+  log(`job ${jobId.slice(0, 8)} complete (${fileCount} files, ${(totalBytes / 1024 / 1024).toFixed(1)} MB)`);
 }
 
 /**
@@ -569,7 +582,7 @@ async function runLocalIngestJob(api, cfg, job, localSrcPath, caps) {
   fs.mkdirSync(workDir, { recursive: true });
   const hlsDir = path.join(workDir, 'hls');
   fs.mkdirSync(hlsDir, { recursive: true });
-  for (const v of ['v480p', 'v720p', 'v1080p']) {
+  for (const v of ['v1080p']) {
     fs.mkdirSync(path.join(hlsDir, v), { recursive: true });
   }
 
@@ -582,22 +595,16 @@ async function runLocalIngestJob(api, cfg, job, localSrcPath, caps) {
     api.progress(jobId, pct * 0.90).catch(() => {});
   });
 
-  // 3. Upload HLS output to R2.
-  const files = walkFiles(hlsDir);
-  log(`uploading ${files.length} HLS files`);
-  let totalBytes = 0;
-  for (let i = 0; i < files.length; i++) {
-    const abs = files[i];
-    const rel = path.relative(hlsDir, abs).split(path.sep).join('/');
-    const { bytes } = await uploadFile(api, jobId, abs, rel);
-    totalBytes += bytes;
-    const pct = 0.90 + ((i + 1) / files.length) * 0.10;
+  // 3. Upload HLS output to R2 (12-way parallel).
+  log(`uploading HLS tree (parallel)`);
+  const { totalBytes, fileCount } = await uploadHlsTree(api, jobId, hlsDir, (done, total) => {
+    const pct = 0.90 + (done / total) * 0.10;
     api.progress(jobId, Math.min(0.99, pct)).catch(() => {});
-  }
+  });
 
   await api.complete(jobId, { durationSec, bytes: totalBytes });
   try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  log(`local-ingest job ${jobId.slice(0, 8)} complete (${files.length} files, ${(totalBytes / 1024 / 1024).toFixed(1)} MB)`);
+  log(`local-ingest job ${jobId.slice(0, 8)} complete (${fileCount} files, ${(totalBytes / 1024 / 1024).toFixed(1)} MB)`);
 }
 
 // ---------- subcommands: requests + ingest ----------
@@ -1154,7 +1161,7 @@ async function runGuiIngestJob(api, cfg, caps, filePath, titleId, episodeId, tit
     fs.mkdirSync(workDir, { recursive: true });
     const hlsDir = path.join(workDir, 'hls');
     fs.mkdirSync(hlsDir, { recursive: true });
-    for (const v of ['v480p', 'v720p', 'v1080p']) fs.mkdirSync(path.join(hlsDir, v), { recursive: true });
+    for (const v of ['v1080p']) fs.mkdirSync(path.join(hlsDir, v), { recursive: true });
 
     const durationSec = ffprobeDurationSec(cfg, filePath);
     const args = buildFfmpegArgs(cfg, filePath, hlsDir, caps);
@@ -1164,17 +1171,11 @@ async function runGuiIngestJob(api, cfg, caps, filePath, titleId, episodeId, tit
     }, (child) => { ingestState.childFfmpeg = child; });
 
     ingestState.phase = 'uploading';
-    const files = walkFiles(hlsDir);
-    let totalBytes = 0;
-    for (let i = 0; i < files.length; i++) {
-      const abs = files[i];
-      const rel = path.relative(hlsDir, abs).split(path.sep).join('/');
-      const { bytes } = await uploadFile(api, job.jobId, abs, rel);
-      totalBytes += bytes;
-      const pct = 0.90 + ((i + 1) / files.length) * 0.10;
+    const { totalBytes } = await uploadHlsTree(api, job.jobId, hlsDir, (done, total) => {
+      const pct = 0.90 + (done / total) * 0.10;
       ingestState.progress = Math.min(0.99, pct);
       api.progress(job.jobId, ingestState.progress).catch(() => {});
-    }
+    });
 
     await api.complete(job.jobId, { durationSec, bytes: totalBytes });
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
