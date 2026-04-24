@@ -1,0 +1,19 @@
+# Worker secrets — do NOT commit
+worker.config.json
+*.token
+.env
+.env.*
+
+# Build artifacts
+dist/
+node_modules/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

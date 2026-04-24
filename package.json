@@ -1,0 +1,25 @@
+{
+  "name": "aurasync-worker",
+  "version": "1.0.0",
+  "description": "Remote transcoding worker for AuraSync. Polls the server for jobs, encodes with ffmpeg (hardware-accelerated if available), streams HLS output back to the catalogue's R2 bucket.",
+  "main": "aurasync-worker.js",
+  "bin": {
+    "aurasync-worker": "aurasync-worker.js"
+  },
+  "scripts": {
+    "start": "node aurasync-worker.js",
+    "build:win": "pkg . --target node20-win-x64 --output dist/aurasync-worker.exe",
+    "build:linux": "pkg . --target node20-linux-x64 --output dist/aurasync-worker"
+  },
+  "pkg": {
+    "assets": [],
+    "outputPath": "dist"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}
