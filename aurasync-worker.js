@@ -1080,185 +1080,421 @@ const GUI_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AuraSync Worker — __NAME__</title>
 <style>
-  :root {
-    --bg: #0c0c14; --panel: #15151f; --border: #2a2a3a;
-    --text: #e6e6f0; --muted: #8a8aa0; --accent: #7c5cff; --accent2: #4ec9ff;
-    --ok: #00f5a0; --warn: #ffa502; --err: #ff4757;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 14px ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); }
-  header {
-    display: flex; align-items: center; gap: 12px; padding: 14px 20px;
-    border-bottom: 1px solid var(--border); background: var(--panel);
-  }
-  header h1 { margin: 0; font-size: 16px; }
-  header .spacer { flex: 1; }
-  header .meta { font-size: 12px; color: var(--muted); }
-  .pill { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
-  .pill.ok { background: rgba(0,245,160,0.2); color: var(--ok); }
-  .pill.warn { background: rgba(255,165,2,0.2); color: var(--warn); }
-  .pill.err { background: rgba(255,71,87,0.2); color: var(--err); }
-  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px; }
-  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
-  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-  section h2 {
-    margin: 0; padding: 12px 16px; font-size: 13px; text-transform: uppercase;
-    letter-spacing: 0.06em; color: var(--muted); background: rgba(255,255,255,0.02);
-    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
-  }
-  section h2 .count { color: var(--text); font-weight: 600; }
-  section h2 .spacer { flex: 1; }
-  section h2 input[type="text"] {
-    background: transparent; border: 1px solid var(--border); color: var(--text);
-    padding: 4px 8px; border-radius: 6px; font-size: 12px; min-width: 120px;
-  }
-  section h2 button {
-    background: transparent; color: var(--muted); border: 1px solid var(--border);
-    padding: 3px 8px; border-radius: 6px; font-size: 11px; cursor: pointer;
-  }
-  section h2 button:hover { color: var(--text); border-color: var(--accent); }
-  .list { max-height: 58vh; overflow-y: auto; }
-  .row { padding: 10px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
-  .row:hover { background: rgba(255,255,255,0.03); }
-  .row.selected { background: rgba(124,92,255,0.15); border-left: 3px solid var(--accent); padding-left: 13px; }
-  .row .title { font-weight: 600; }
-  .row .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-  .row .muted { color: var(--muted); }
-  .row .bytes { font-size: 11px; color: var(--muted); margin-top: 2px; font-family: ui-monospace, monospace; }
-  .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
-  footer {
-    position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--border);
-    padding: 14px 20px; display: flex; align-items: center; gap: 16px;
-  }
-  footer .picked { flex: 1; font-size: 13px; }
-  footer .picked .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 6px; }
-  button.primary {
-    background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #000;
-    border: none; padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer;
-  }
-  button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
-  .progress-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none;
-    align-items: center; justify-content: center; z-index: 100;
-  }
-  .progress-overlay.active { display: flex; }
-  .progress-card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 24px; min-width: 360px; max-width: 480px;
-  }
-  .progress-card h3 { margin: 0 0 6px; }
-  .progress-card .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
-  .bar { height: 8px; background: rgba(255,255,255,0.08); border-radius: 999px; overflow: hidden; }
-  .bar > span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.3s; }
-  .phase { margin-top: 8px; font-size: 12px; color: var(--muted); }
-  .progress-card .err-msg { color: var(--err); margin-top: 10px; font-size: 13px; }
-  .progress-card .ok-msg { color: var(--ok); margin-top: 10px; font-size: 13px; }
-  .progress-card .actions { margin-top: 14px; display: flex; gap: 8px; justify-content: flex-end; }
-  .progress-card .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 6px; cursor: pointer; }
-  .inbox-config {
-    padding: 10px 16px; background: rgba(255,255,255,0.02); border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted);
-  }
-  .inbox-config code { font-family: ui-monospace, monospace; color: var(--text); background: rgba(255,255,255,0.04); padding: 2px 6px; border-radius: 4px; }
-  .inbox-config input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 5px 8px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+:root {
+  --bg: #0c0e14;
+  --panel: #151826;
+  --panel-2: #1d2030;
+  --panel-hover: #242838;
+  --border: rgba(255,255,255,0.07);
+  --border-strong: rgba(255,255,255,0.14);
+  --text: #e8eaf2;
+  --text-dim: #9aa0b0;
+  --text-muted: #6d7287;
+  --accent: #5b8cff;
+  --accent2: #9769ff;
+  --accent-glow: rgba(91,140,255,0.3);
+  --ok: #3fd8a0;
+  --warn: #ffb547;
+  --err: #ff5d6e;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --transition: 160ms cubic-bezier(.2,.8,.2,1);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  display: flex; flex-direction: column;
+  background:
+    radial-gradient(ellipse 700px 500px at 20% -10%, rgba(91,140,255,0.08), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 90% 110%, rgba(151,105,255,0.06), transparent 60%),
+    var(--bg);
+}
+button { font-family: inherit; }
 
-  /* Right-column tabs (Files / Folder) */
-  .right-tabs {
-    display: flex; gap: 4px; padding: 8px 12px 0;
-    border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
-  }
-  .right-tab {
-    background: transparent; border: 1px solid transparent; color: var(--muted);
-    padding: 6px 14px; border-radius: 6px 6px 0 0; font-size: 12px;
-    font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-  }
-  .right-tab:hover { color: var(--text); }
-  .right-tab.active {
-    color: var(--text); border-bottom-color: var(--accent);
-  }
-  .right-tab-panel[hidden] { display: none; }
+header.top {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--border);
+}
+header.top .brand {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-size: 16px; font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+header.top .brand-mark {
+  width: 28px; height: 28px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  display: grid; place-items: center;
+  color: #0a0a1a; font-size: 13px; font-weight: 900;
+  -webkit-text-fill-color: #0a0a1a;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+header.top .meta { font-size: 12px; color: var(--text-dim); }
+header.top .spacer { flex: 1; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 100px;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.pill.ok { background: rgba(63,216,160,0.14); color: var(--ok); }
+.pill.ok::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.pill.warn { background: rgba(255,181,71,0.14); color: var(--warn); }
+.pill.err { background: rgba(255,93,110,0.14); color: var(--err); }
 
-  /* Folder panel */
-  .folder-controls {
-    padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
-    border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
-  }
-  .folder-controls label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-  .folder-controls input, .folder-controls select {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    padding: 7px 10px; border-radius: 6px; font-size: 13px;
-    font-family: ui-monospace, monospace;
-  }
-  .folder-controls select { font-family: inherit; }
-  .folder-actions { display: flex; gap: 8px; margin-top: 4px; }
-  .folder-actions button {
-    padding: 7px 14px; border: 1px solid var(--border); background: var(--panel);
-    color: var(--text); border-radius: 6px; cursor: pointer; font-size: 13px;
-  }
-  .folder-actions button.primary {
-    background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #000;
-    border: none; font-weight: 600;
-  }
-  .folder-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .folder-summary {
-    padding: 10px 16px; font-size: 12px; color: var(--muted);
-    border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
-  }
-  .folder-summary:empty { display: none; }
-  .folder-summary .ok { color: var(--ok); }
-  .folder-summary .warn { color: var(--warn); }
-  #folder-results .row { display: block; }
-  #folder-results .row .file { font-family: ui-monospace, monospace; font-size: 12px; }
-  #folder-results .row.matched .file { color: var(--text); }
-  #folder-results .row.skipped .file { color: var(--muted); text-decoration: line-through; opacity: 0.7; }
-  #folder-results .row .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  #folder-results .row.matched .meta .tag {
-    background: rgba(0,245,160,0.15); color: var(--ok);
-    padding: 1px 6px; border-radius: 999px; font-size: 10px; margin-right: 4px;
-    text-transform: uppercase; letter-spacing: 0.05em;
-  }
-  #folder-results .row.skipped .meta .tag {
-    background: rgba(138,138,160,0.15); color: var(--muted);
-    padding: 1px 6px; border-radius: 999px; font-size: 10px; margin-right: 4px;
-    text-transform: uppercase; letter-spacing: 0.05em;
-  }
+main {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  padding: 18px 22px;
+  flex: 1; min-height: 0;
+}
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+section.pane {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  min-height: 0;
+}
+
+.pane-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+  font-size: 11px; font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.pane-header .count {
+  font-size: 12px; color: var(--text); font-weight: 700;
+  text-transform: none; letter-spacing: 0;
+  padding: 1px 8px; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 100px;
+}
+.pane-header .spacer { flex: 1; }
+.pane-header button, .pane-header input[type=text] {
+  background: var(--panel-2); color: var(--text-dim);
+  border: 1px solid var(--border);
+  padding: 5px 10px; border-radius: 6px;
+  font-size: 12px; cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+.pane-header button:hover { color: var(--text); border-color: var(--border-strong); }
+.pane-header input[type=text]:focus { outline: none; color: var(--text); border-color: var(--accent); }
+
+.right-tabs {
+  display: flex; gap: 2px; padding: 6px 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.right-tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 10px 18px; margin-bottom: -1px;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+.right-tab:hover { color: var(--text); }
+.right-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.right-tab-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.right-tab-panel[hidden] { display: none; }
+
+.list { overflow-y: auto; flex: 1; min-height: 0; }
+.row {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.row:hover { background: var(--panel-hover); }
+.row.selected {
+  background: linear-gradient(90deg, rgba(91,140,255,0.14), transparent);
+  border-left: 3px solid var(--accent);
+  padding-left: 13px;
+}
+.row .title { font-weight: 600; font-size: 14px; color: var(--text); }
+.row .sub { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+.row .meta-line { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-family: ui-monospace, monospace; }
+.row .bytes { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-family: ui-monospace, monospace; }
+.row.empty {
+  padding: 40px 16px; text-align: center;
+  color: var(--text-muted); cursor: default;
+}
+.row.empty:hover { background: transparent; }
+
+.inbox-config {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text-muted);
+}
+.inbox-config input {
+  flex: 1; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px;
+  font-family: ui-monospace, monospace; font-size: 12px;
+}
+.inbox-config button {
+  background: var(--panel-2); color: var(--text-dim);
+  border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px;
+  font-size: 12px; cursor: pointer;
+}
+
+.folder-controls {
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.folder-controls label {
+  font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.folder-controls input, .folder-controls select {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border);
+  padding: 9px 12px; border-radius: 8px;
+  font-size: 13px; font-family: ui-monospace, monospace;
+}
+.folder-controls select { font-family: inherit; }
+.folder-controls input:focus, .folder-controls select:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.folder-actions { display: flex; gap: 8px; margin-top: 4px; }
+.btn {
+  padding: 9px 16px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text);
+  border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500;
+  transition: all var(--transition);
+}
+.btn:hover { border-color: var(--border-strong); background: var(--panel-hover); }
+.btn.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #0a0a1a; border: none; font-weight: 700;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.btn.primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px var(--accent-glow); }
+.btn.ghost { background: transparent; color: var(--text-dim); border-color: var(--border); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+
+.folder-summary {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim);
+}
+.folder-summary:empty { display: none; }
+.folder-summary .tag {
+  display: inline-block; padding: 2px 8px; border-radius: 100px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  margin-right: 6px;
+}
+.folder-summary .tag.ok { background: rgba(63,216,160,0.15); color: var(--ok); }
+.folder-summary .tag.warn { background: rgba(255,93,110,0.15); color: var(--err); }
+
+#folder-results .row { cursor: default; }
+#folder-results .row.matched .file-line { color: var(--text); }
+#folder-results .row.skipped .file-line { color: var(--text-muted); opacity: 0.65; }
+#folder-results .file-line { font-family: ui-monospace, monospace; font-size: 12px; }
+#folder-results .meta-line .tag {
+  padding: 2px 7px; border-radius: 100px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  margin-right: 6px;
+}
+#folder-results .row.matched .meta-line .tag { background: rgba(63,216,160,0.15); color: var(--ok); }
+#folder-results .row.skipped .meta-line .tag { background: rgba(109,114,135,0.15); color: var(--text-muted); }
+
+.action-bar {
+  padding: 12px 22px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  display: flex; align-items: center; gap: 16px;
+}
+.action-bar .picked { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.action-bar .picked > div { font-size: 13px; display: flex; gap: 8px; align-items: center; min-width: 0; }
+.action-bar .picked .lbl {
+  font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-weight: 600; flex-shrink: 0; width: 66px;
+}
+.action-bar .picked .val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-bar .picked .val.none { color: var(--text-muted); }
+
+.activity {
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--panel), var(--bg));
+  padding: 14px 22px;
+  transition: padding var(--transition);
+}
+.activity.expanded { padding: 18px 22px 22px; }
+.activity-idle {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px; color: var(--text-dim);
+}
+.activity-idle::before {
+  content: ''; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ok); box-shadow: 0 0 8px var(--ok);
+}
+.activity.expanded .activity-idle { display: none; }
+.activity-expanded { display: none; }
+.activity.expanded .activity-expanded { display: block; }
+
+.act-head {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 10px;
+}
+.act-head .icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  display: grid; place-items: center; font-size: 16px;
+  background: var(--panel-2); color: var(--accent);
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+.act-head .icon.running {
+  background: linear-gradient(135deg, rgba(91,140,255,0.25), rgba(151,105,255,0.25));
+  color: var(--accent);
+  animation: pulse-glow 1600ms ease-in-out infinite;
+}
+.act-head .icon.uploading { color: var(--ok); background: rgba(63,216,160,0.15); }
+.act-head .icon.done { color: var(--ok); background: rgba(63,216,160,0.2); }
+.act-head .icon.error { color: var(--err); background: rgba(255,93,110,0.15); }
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(91,140,255,0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(91,140,255,0); }
+}
+.act-head .info { flex: 1; min-width: 0; }
+.act-head .info .title-row { font-size: 14px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+.act-head .info .phase-chip {
+  padding: 2px 8px; border-radius: 100px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.act-head .info .phase-chip.transcoding { background: rgba(91,140,255,0.18); color: var(--accent); }
+.act-head .info .phase-chip.uploading { background: rgba(63,216,160,0.18); color: var(--ok); }
+.act-head .info .phase-chip.done { background: rgba(63,216,160,0.22); color: var(--ok); }
+.act-head .info .phase-chip.error { background: rgba(255,93,110,0.18); color: var(--err); }
+.act-head .info .sub { font-size: 12px; color: var(--text-dim); margin-top: 3px; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-head .cancel { flex-shrink: 0; }
+
+.bar {
+  height: 8px; background: var(--panel-2); border-radius: 100px; overflow: hidden;
+  margin-bottom: 6px;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.3);
+}
+.bar > span {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transition: width 300ms ease-out;
+  border-radius: 100px;
+}
+.bar.uploading > span { background: linear-gradient(90deg, var(--ok), #70e8bc); }
+.bar.done > span { background: var(--ok); }
+.bar.error > span { background: var(--err); }
+.bar-legend {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; color: var(--text-muted);
+}
+.bar-legend strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.bar-legend .right { display: flex; gap: 10px; font-variant-numeric: tabular-nums; }
+
+.queue-section {
+  margin-top: 14px; padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.queue-section .label {
+  font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-weight: 600; margin-bottom: 6px;
+}
+.queue-section .bar > span {
+  background: linear-gradient(90deg, var(--accent2), var(--accent));
+}
+.queue-legend {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--text-muted); margin-top: 4px;
+}
+.queue-legend .right { display: flex; gap: 12px; font-variant-numeric: tabular-nums; }
+.queue-legend .ok-c { color: var(--ok); }
+.queue-legend .fail-c { color: var(--err); }
+
+.history-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 14px; margin-bottom: 6px;
+  font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.history-list {
+  max-height: 180px; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.history-list:empty::after {
+  content: 'No files completed yet.'; display: block;
+  padding: 14px; text-align: center; color: var(--text-muted); font-size: 12px;
+}
+.history-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.history-item + .history-item { border-top: 1px solid var(--border); }
+.history-item .mark {
+  width: 18px; height: 18px; border-radius: 5px;
+  display: grid; place-items: center;
+  font-size: 10px; font-weight: 800;
+  flex-shrink: 0;
+}
+.history-item.done .mark { background: rgba(63,216,160,0.18); color: var(--ok); }
+.history-item.failed .mark { background: rgba(255,93,110,0.18); color: var(--err); }
+.history-item .label-ep {
+  font-size: 10px; font-weight: 700;
+  padding: 2px 6px; border-radius: 100px;
+  background: var(--panel-2); color: var(--text-dim);
+  flex-shrink: 0; min-width: 44px; text-align: center;
+}
+.history-item .file { flex: 1; font-family: ui-monospace, monospace; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.history-item .dur { color: var(--text-muted); font-size: 11px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.history-item.failed .file { color: var(--text-dim); }
+
+.hidden { display: none !important; }
+.muted { color: var(--text-muted); }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>AuraSync Worker</h1>
+<header class="top">
+  <span class="brand"><span class="brand-mark">◉</span> AuraSync</span>
   <span class="meta">__NAME__ · __SERVER__</span>
   <span class="spacer"></span>
   <span class="pill ok" id="status-pill">idle</span>
 </header>
 
 <main>
-  <section>
-    <h2>
+  <section class="pane">
+    <div class="pane-header">
       <span>Pending requests</span>
       <span class="count" id="req-count">–</span>
       <span class="spacer"></span>
       <button id="refresh-req">Refresh</button>
-    </h2>
+    </div>
     <div class="list" id="requests"></div>
   </section>
 
-  <section>
+  <section class="pane">
     <div class="right-tabs" role="tablist">
       <button class="right-tab active" data-tab="files" role="tab">Files</button>
       <button class="right-tab" data-tab="folder" role="tab">Folder</button>
     </div>
 
     <div id="tab-files" class="right-tab-panel">
-      <h2>
+      <div class="pane-header">
         <span>Local files</span>
         <span class="count" id="file-count">–</span>
         <span class="spacer"></span>
         <input type="text" id="filter" placeholder="filter filenames…">
         <button id="refresh-files">Refresh</button>
-      </h2>
+      </div>
       <div class="inbox-config">
         Inbox:
         <input id="inbox-path" value="">
@@ -1269,13 +1505,13 @@ const GUI_HTML = `<!doctype html>
 
     <div id="tab-folder" class="right-tab-panel" hidden>
       <div class="folder-controls">
-        <label>Folder</label>
+        <label>Folder path</label>
         <input id="folder-path" placeholder="C:\\TV\\The Big Bang Theory" />
         <label>Title scope (optional)</label>
         <select id="folder-title"><option value="">— any pending request —</option></select>
         <div class="folder-actions">
-          <button id="folder-scan">Scan</button>
-          <button id="folder-ingest" class="primary" disabled>Ingest matched →</button>
+          <button id="folder-scan" class="btn">Scan</button>
+          <button id="folder-ingest" class="btn primary" disabled>Ingest matched →</button>
         </div>
       </div>
       <div class="folder-summary" id="folder-summary"></div>
@@ -1284,26 +1520,60 @@ const GUI_HTML = `<!doctype html>
   </section>
 </main>
 
-<footer>
+<div class="action-bar" id="action-bar">
   <div class="picked">
-    <div><span class="lbl">Request</span><span id="picked-req">none</span></div>
-    <div><span class="lbl">File</span><span id="picked-file">none</span></div>
+    <div><span class="lbl">Request</span><span id="picked-req" class="val none">none</span></div>
+    <div><span class="lbl">File</span><span id="picked-file" class="val none">none</span></div>
   </div>
-  <button class="primary" id="fulfill" disabled>Fulfill →</button>
-</footer>
+  <button class="btn primary" id="fulfill" disabled>Fulfill →</button>
+</div>
 
-<div class="progress-overlay" id="progress-overlay">
-  <div class="progress-card">
-    <h3 id="p-title">Transcoding</h3>
-    <div class="sub" id="p-sub">—</div>
-    <div class="bar"><span id="p-bar"></span></div>
-    <div class="phase" id="p-phase">starting…</div>
-    <div class="err-msg" id="p-err" style="display:none"></div>
-    <div class="ok-msg" id="p-ok" style="display:none"></div>
-    <div class="actions">
-      <button id="p-close" style="display:none">Close</button>
-      <button id="p-cancel">Cancel</button>
+<!-- Activity panel: always visible; collapses to a one-line 'Ready' strip
+     when no ingest is active, expands to show current-file progress,
+     queue progress, and recent history when something is running or
+     just finished. Replaces the old modal progress overlay. -->
+<div class="activity" id="activity">
+  <div class="activity-idle">Ready — pick a request + file (Files tab) or paste a folder path (Folder tab) to start.</div>
+  <div class="activity-expanded">
+    <div class="act-head">
+      <div class="icon" id="act-icon">⚙</div>
+      <div class="info">
+        <div class="title-row">
+          <span id="act-title">—</span>
+          <span class="phase-chip" id="act-phase-chip">starting</span>
+        </div>
+        <div class="sub" id="act-sub">—</div>
+      </div>
+      <button class="btn ghost cancel" id="act-cancel" type="button">Cancel</button>
     </div>
+
+    <div class="bar" id="act-file-bar"><span id="act-file-fill" style="width:0%"></span></div>
+    <div class="bar-legend">
+      <span class="left"><strong id="act-file-pct">0%</strong> current file</span>
+      <span class="right">
+        <span id="act-file-elapsed">0:00</span>
+        <span class="muted">elapsed</span>
+      </span>
+    </div>
+
+    <div class="queue-section" id="act-queue-section" hidden>
+      <div class="label">Queue progress</div>
+      <div class="bar" id="act-queue-bar"><span id="act-queue-fill" style="width:0%"></span></div>
+      <div class="queue-legend">
+        <span><strong id="act-queue-n">0 / 0</strong> files</span>
+        <span class="right">
+          <span class="ok-c" id="act-queue-ok">0 done</span>
+          <span class="fail-c" id="act-queue-fail">0 failed</span>
+          <span id="act-queue-eta" class="muted">eta —</span>
+        </span>
+      </div>
+    </div>
+
+    <div class="history-head">
+      <span>Recent</span>
+      <span class="muted" id="act-history-count">0 items</span>
+    </div>
+    <div class="history-list" id="act-history"></div>
   </div>
 </div>
 
@@ -1423,13 +1693,18 @@ const GUI_HTML = `<!doctype html>
   function updateFooter() {
     const pr = state.pickedReq;
     const pf = state.pickedFile;
+    const reqEl = $('picked-req');
+    const fileEl = $('picked-file');
     if (pr) {
       const ep = pr.episodeSeason ? ' — S' + pr.episodeSeason + 'E' + pr.episodeNumber : '';
-      $('picked-req').textContent = pr.titleTitle + ep;
+      reqEl.textContent = pr.titleTitle + ep;
+      reqEl.className = 'val';
     } else {
-      $('picked-req').textContent = 'none';
+      reqEl.textContent = 'none';
+      reqEl.className = 'val none';
     }
-    $('picked-file').textContent = pf ? pf.rel : 'none';
+    if (pf) { fileEl.textContent = pf.rel; fileEl.className = 'val'; }
+    else { fileEl.textContent = 'none'; fileEl.className = 'val none'; }
     $('fulfill').disabled = !(pr && pf) || state.ingestRunning;
   }
 
@@ -1437,7 +1712,6 @@ const GUI_HTML = `<!doctype html>
     if (!state.pickedReq || !state.pickedFile) return;
     const req = state.pickedReq;
     const file = state.pickedFile;
-    showProgress(true, req.titleTitle, file.rel);
     state.ingestRunning = true;
     updateFooter();
     try {
@@ -1451,7 +1725,7 @@ const GUI_HTML = `<!doctype html>
         }),
       });
     } catch (e) {
-      showError(e.message);
+      showActivityError(e.message);
       state.ingestRunning = false;
       updateFooter();
       return;
@@ -1459,24 +1733,152 @@ const GUI_HTML = `<!doctype html>
     pollStatus();
   }
 
+  // ---- Activity panel (inline; replaces the old modal progress overlay) ----
+  function fmtDur(ms) {
+    if (ms == null || ms < 0) return '—';
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (h > 0) return h + ':' + String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+    return m + ':' + String(sec).padStart(2, '0');
+  }
+  function iconForPhase(phase) {
+    if (phase === 'done') return '✓';
+    if (phase === 'error') return '✕';
+    if (phase === 'uploading') return '↑';
+    if (phase === 'transcoding') return '▶';
+    return '⚙';
+  }
+  function classForPhase(phase) {
+    if (phase === 'done') return 'done';
+    if (phase === 'error') return 'error';
+    if (phase === 'uploading') return 'uploading';
+    if (phase === 'transcoding') return 'running';
+    return 'running';
+  }
+
+  function renderActivity(s) {
+    const act = $('activity');
+    const nowIdle = !s || (!s.active && !state.ingestRunning);
+    act.classList.toggle('expanded', !nowIdle);
+
+    if (nowIdle) return;
+
+    // Determine effective phase — prefer currentFile.phase for fine detail,
+    // else top-level phase.
+    const phase = (s.currentFile && s.currentFile.phase) || s.phase || 'starting';
+    const pclass = classForPhase(phase);
+    $('act-icon').className = 'icon ' + pclass;
+    $('act-icon').textContent = iconForPhase(phase);
+
+    // Title row
+    let titleText;
+    if (s.queue) {
+      const idx = Math.min(s.queue.currentIndex + 1, s.queue.total);
+      titleText = 'Folder ingest · ' + idx + '/' + s.queue.total;
+    } else {
+      titleText = s.titleName || 'Transcoding';
+    }
+    $('act-title').textContent = titleText;
+
+    const chip = $('act-phase-chip');
+    chip.className = 'phase-chip ' + pclass;
+    chip.textContent = phase === 'error' ? 'failed' : phase;
+
+    // Sub line — current file path + encoder
+    const cf = s.currentFile;
+    const subParts = [];
+    if (cf && cf.rel) subParts.push(cf.rel);
+    else if (s.filePath) subParts.push(s.filePath);
+    if (cf && cf.season != null) subParts.push('S' + cf.season + 'E' + cf.episode);
+    if (s.encoder) subParts.push(s.encoder);
+    $('act-sub').textContent = subParts.join(' · ') || '—';
+
+    // Per-file bar
+    const filePct = cf ? (cf.progress || 0) : (s.progress || 0);
+    const pctInt = Math.round(filePct * 100);
+    $('act-file-fill').style.width = pctInt + '%';
+    $('act-file-fill').parentElement.className = 'bar ' + (phase === 'uploading' ? 'uploading' : phase === 'done' ? 'done' : phase === 'error' ? 'error' : '');
+    $('act-file-pct').textContent = pctInt + '%';
+    // File elapsed
+    const fileStart = cf && cf.startedAt ? cf.startedAt : null;
+    $('act-file-elapsed').textContent = fileStart ? fmtDur(Date.now() - fileStart) : '—';
+
+    // Queue bar (folder ingest only)
+    const q = s.queue;
+    if (q) {
+      $('act-queue-section').hidden = false;
+      const qPct = q.total > 0 ? Math.round((q.done / q.total) * 100) : 0;
+      $('act-queue-fill').style.width = qPct + '%';
+      $('act-queue-n').textContent = q.done + ' / ' + q.total;
+      $('act-queue-ok').textContent = (q.succeeded || 0) + ' done';
+      $('act-queue-fail').textContent = (q.failed || 0) + ' failed';
+      $('act-queue-eta').textContent = s.etaMs ? 'eta ' + fmtDur(s.etaMs) : 'eta —';
+    } else {
+      $('act-queue-section').hidden = true;
+    }
+
+    // History
+    const hist = s.history || [];
+    $('act-history-count').textContent = hist.length + ' items';
+    $('act-history').innerHTML = hist.map((h) => {
+      const cls = h.status === 'done' ? 'done' : 'failed';
+      const mark = h.status === 'done' ? '✓' : '✕';
+      const ep = h.episode ? '<span class="label-ep">' + esc(h.episode) + '</span>' : '';
+      const dur = fmtDur(h.durationMs);
+      const reasonLine = (h.status === 'failed' && h.reason)
+        ? '<div class="reason">' + esc(h.reason) + '</div>'
+        : '';
+      return '<div class="history-item ' + cls + '">' +
+        '<span class="mark">' + mark + '</span>' +
+        ep +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="file">' + esc(h.rel) + '</div>' +
+          reasonLine +
+        '</div>' +
+        '<span class="dur">' + dur + '</span>' +
+      '</div>';
+    }).join('');
+
+    // Cancel button shown while actively running, hidden on done/error.
+    $('act-cancel').style.display = (phase === 'done' || phase === 'error') ? 'none' : '';
+  }
+
+  function showActivityError(msg) {
+    const act = $('activity');
+    act.classList.add('expanded');
+    $('act-icon').className = 'icon error';
+    $('act-icon').textContent = '✕';
+    $('act-title').textContent = 'Failed';
+    const chip = $('act-phase-chip');
+    chip.className = 'phase-chip error';
+    chip.textContent = 'failed';
+    $('act-sub').textContent = msg || '';
+    $('act-file-fill').style.width = '0%';
+    $('act-file-fill').parentElement.className = 'bar error';
+    $('act-cancel').style.display = 'none';
+  }
+
   let pollTimer = null;
   async function pollStatus() {
     if (pollTimer) clearTimeout(pollTimer);
     try {
       const s = await api('/api/state');
+      renderActivity(s);
       if (s.active) {
-        updateProgress(s);
         if (s.phase === 'done') {
-          showOk('Title is now available in the catalogue.');
           state.ingestRunning = false;
-          // Refresh requests — the fulfilled one should have disappeared.
-          setTimeout(() => { loadRequests(); state.pickedReq = null; state.pickedFile = null; updateFooter(); }, 1500);
+          setTimeout(() => {
+            loadRequests();
+            state.pickedReq = null; state.pickedFile = null;
+            updateFooter();
+          }, 1500);
+          // Keep polling briefly so the panel shows the final state; then stop.
+          pollTimer = setTimeout(pollStatus, 3000);
         } else if (s.phase === 'error') {
-          showError(s.error || 'transcode failed');
           state.ingestRunning = false;
           updateFooter();
         } else {
-          pollTimer = setTimeout(pollStatus, 1000);
+          pollTimer = setTimeout(pollStatus, 500);  // faster polling for live progress
         }
       } else {
         pollTimer = setTimeout(pollStatus, 1000);
@@ -1484,34 +1886,6 @@ const GUI_HTML = `<!doctype html>
     } catch {
       pollTimer = setTimeout(pollStatus, 2000);
     }
-  }
-
-  function showProgress(open, titleName, fileName) {
-    $('progress-overlay').classList.toggle('active', !!open);
-    $('p-title').textContent = 'Transcoding ' + titleName;
-    $('p-sub').textContent = fileName;
-    $('p-phase').textContent = 'starting…';
-    $('p-bar').style.width = '0%';
-    $('p-err').style.display = 'none';
-    $('p-ok').style.display = 'none';
-    $('p-close').style.display = 'none';
-    $('p-cancel').style.display = '';
-  }
-  function updateProgress(s) {
-    $('p-bar').style.width = (Math.round((s.progress || 0) * 100)) + '%';
-    $('p-phase').textContent = s.phase + ' · ' + Math.round((s.progress || 0) * 100) + '%' + (s.encoder ? ' · ' + s.encoder : '');
-  }
-  function showError(msg) {
-    $('p-err').textContent = 'Failed: ' + msg;
-    $('p-err').style.display = '';
-    $('p-close').style.display = '';
-    $('p-cancel').style.display = 'none';
-  }
-  function showOk(msg) {
-    $('p-ok').textContent = '✓ ' + msg;
-    $('p-ok').style.display = '';
-    $('p-close').style.display = '';
-    $('p-cancel').style.display = 'none';
   }
 
   async function saveInbox() {
@@ -1528,8 +1902,7 @@ const GUI_HTML = `<!doctype html>
   $('filter').addEventListener('input', renderFiles);
   $('save-inbox').onclick = saveInbox;
   $('fulfill').onclick = doFulfill;
-  $('p-close').onclick = () => { $('progress-overlay').classList.remove('active'); };
-  $('p-cancel').onclick = async () => {
+  $('act-cancel').onclick = async () => {
     if (!confirm('Cancel the current transcode?')) return;
     try { await api('/api/cancel', { method: 'POST' }); } catch {}
   };
@@ -1630,7 +2003,7 @@ const GUI_HTML = `<!doctype html>
     state.folder.ingesting = true;
     state.ingestRunning = true;
     $('folder-ingest').disabled = true;
-    showProgress(true, state.folder.path.split(/[\\/]+/).pop() || 'folder', ok.length + ' file(s)');
+    // Kick off, then let the poll + activity panel do the rest.
     try {
       await api('/api/folder-ingest', {
         method: 'POST',
@@ -1639,7 +2012,7 @@ const GUI_HTML = `<!doctype html>
       });
       pollStatus();
     } catch (e) {
-      showError(e.message);
+      showActivityError(e.message);
       state.folder.ingesting = false;
       state.ingestRunning = false;
     }
@@ -1667,13 +2040,30 @@ const ingestState = {
   titleName: null,
   filePath: null,
   jobId: null,
-  progress: 0,
-  phase: 'idle',     // 'idle' | 'starting' | 'transcoding' | 'uploading' | 'done' | 'error'
+  progress: 0,           // overall queue progress 0..1
+  phase: 'idle',         // 'idle' | 'starting' | 'transcoding' | 'uploading' | 'done' | 'error'
   error: null,
   encoder: null,
   startedAt: null,
-  childFfmpeg: null, // ref for cancel
+  childFfmpeg: null,     // ref for cancel
+  // Per-file detail (same shape whether it's a single-file ingest or the
+  // current item of a folder queue). Lets the GUI show file-level %
+  // separately from queue-level %.
+  currentFile: null,     // { rel, bytes, startedAt, progress (0..1), phase }
+  // Queue tracking (for folder ingests; single-file ingest leaves these null).
+  queue: null,           // { total, done, succeeded, failed, currentIndex }
+  // Rolling history of recent files across this session so the Activity panel
+  // can show a log — newest first. Capped at HISTORY_MAX entries.
+  history: [],           // [{ rel, status: 'done'|'failed', durationMs, bytes, episode, reason? }]
 };
+const HISTORY_MAX = 30;
+
+function pushHistory(entry) {
+  ingestState.history.unshift(entry);
+  if (ingestState.history.length > HISTORY_MAX) {
+    ingestState.history.length = HISTORY_MAX;
+  }
+}
 
 function readJsonBody(req, limit = 64 * 1024) {
   return new Promise((resolve, reject) => {
@@ -1721,6 +2111,7 @@ function listInboxFiles(inbox) {
 }
 
 async function runGuiIngestJob(api, cfg, caps, filePath, titleId, episodeId, titleName) {
+  const startedAt = Date.now();
   ingestState.active = true;
   ingestState.titleId = titleId;
   ingestState.episodeId = episodeId || null;
@@ -1730,19 +2121,24 @@ async function runGuiIngestJob(api, cfg, caps, filePath, titleId, episodeId, tit
   ingestState.phase = 'starting';
   ingestState.error = null;
   ingestState.encoder = caps.picked;
-  ingestState.startedAt = Date.now();
+  ingestState.startedAt = startedAt;
+  ingestState.queue = null;  // single-file: no queue
+  ingestState.currentFile = {
+    rel: path.basename(filePath),
+    bytes: 0, progress: 0, phase: 'starting', startedAt,
+  };
+  const rel = path.basename(filePath);
   try {
     const stat = fs.statSync(filePath);
+    ingestState.currentFile.bytes = stat.size;
     const job = await api.ingestLocal({
       titleId, episodeId: episodeId || null,
       filename: path.basename(filePath), bytes: stat.size,
     });
     ingestState.jobId = job.jobId;
     ingestState.phase = 'transcoding';
+    ingestState.currentFile.phase = 'transcoding';
 
-    // Run the same local-ingest flow used by the CLI, but route progress
-    // into ingestState for the GUI to poll. We can't reuse runLocalIngestJob
-    // directly because we need finer-grained phase labels.
     const workDir = path.join(cfg.tmpDir, job.jobId);
     fs.mkdirSync(workDir, { recursive: true });
     const hlsDir = path.join(workDir, 'hls');
@@ -1752,30 +2148,36 @@ async function runGuiIngestJob(api, cfg, caps, filePath, titleId, episodeId, tit
     const durationSec = ffprobeDurationSec(cfg, filePath);
     const args = buildFfmpegArgs(cfg, filePath, hlsDir, caps);
     await runFfmpegWithProgress(cfg, args, durationSec || 0, (pct) => {
-      ingestState.progress = Math.max(0, Math.min(0.9, pct * 0.90));
-      api.progress(job.jobId, ingestState.progress).catch(() => {});
+      const p = Math.max(0, Math.min(0.9, pct * 0.90));
+      ingestState.progress = p;
+      if (ingestState.currentFile) ingestState.currentFile.progress = p;
+      api.progress(job.jobId, p).catch(() => {});
     }, (child) => { ingestState.childFfmpeg = child; });
 
     ingestState.phase = 'uploading';
+    if (ingestState.currentFile) ingestState.currentFile.phase = 'uploading';
     const { totalBytes } = await uploadHlsTree(api, job.jobId, hlsDir, (done, total) => {
-      const pct = 0.90 + (done / total) * 0.10;
-      ingestState.progress = Math.min(0.99, pct);
-      api.progress(job.jobId, ingestState.progress).catch(() => {});
+      const p = Math.min(0.99, 0.90 + (done / total) * 0.10);
+      ingestState.progress = p;
+      if (ingestState.currentFile) ingestState.currentFile.progress = p;
+      api.progress(job.jobId, p).catch(() => {});
     });
 
     await api.complete(job.jobId, { durationSec, bytes: totalBytes });
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
     ingestState.progress = 1;
     ingestState.phase = 'done';
+    if (ingestState.currentFile) ingestState.currentFile.progress = 1;
+    pushHistory({ rel, status: 'done', durationMs: Date.now() - startedAt, bytes: totalBytes, episode: null });
   } catch (err) {
+    const reason = err.message || String(err);
     ingestState.phase = 'error';
-    ingestState.error = err.message || String(err);
+    ingestState.error = reason;
     if (ingestState.jobId) {
-      try { await api.fail(ingestState.jobId, ingestState.error, false); } catch { /* ignore */ }
+      try { await api.fail(ingestState.jobId, reason, false); } catch { /* ignore */ }
     }
+    pushHistory({ rel, status: 'failed', durationMs: Date.now() - startedAt, bytes: 0, episode: null, reason });
   } finally {
-    // Leave state in place so the GUI can show 'done' / 'error' briefly.
-    // The next call to runGuiIngestJob resets it.
     ingestState.active = false;
     ingestState.childFfmpeg = null;
   }
@@ -1806,6 +2208,7 @@ async function runGuiFolderIngest(api, cfg, caps, folder, titleId) {
     return;
   }
 
+  const queueStart = Date.now();
   ingestState.active = true;
   ingestState.titleId = null;
   ingestState.episodeId = null;
@@ -1815,17 +2218,26 @@ async function runGuiFolderIngest(api, cfg, caps, folder, titleId) {
   ingestState.phase = 'starting';
   ingestState.error = null;
   ingestState.encoder = caps.picked;
-  ingestState.startedAt = Date.now();
+  ingestState.startedAt = queueStart;
+  ingestState.queue = { total: matches.length, done: 0, succeeded: 0, failed: 0, currentIndex: 0 };
 
   let succeeded = 0;
   let failed = 0;
   for (let i = 0; i < matches.length; i++) {
     const m = matches[i];
     const stat = fs.statSync(m.file.abs);
-    ingestState.phase = `file ${i + 1}/${matches.length} · S${m.season}E${m.episode}`;
+    const fileStart = Date.now();
+    ingestState.phase = `transcoding`;
     ingestState.titleId = m.titleId;
     ingestState.episodeId = m.episodeId || null;
     ingestState.filePath = m.file.abs;
+    ingestState.queue.currentIndex = i;
+    ingestState.currentFile = {
+      rel: m.file.rel, bytes: stat.size, startedAt: fileStart,
+      progress: 0, phase: 'starting',
+      season: m.season, episode: m.episode,
+      episodeName: m.episodeName || null, titleTitle: m.titleTitle || null,
+    };
 
     let job;
     try {
@@ -1838,7 +2250,10 @@ async function runGuiFolderIngest(api, cfg, caps, folder, titleId) {
       ingestState.jobId = job.jobId;
     } catch (e) {
       failed++;
+      ingestState.queue.failed = failed;
       warn(`folder-ingest: ingest-local failed for ${m.file.rel}: ${e.message}`);
+      pushHistory({ rel: m.file.rel, status: 'failed', durationMs: Date.now() - fileStart, bytes: 0,
+        episode: `S${m.season}E${m.episode}`, reason: 'ingest-local: ' + e.message });
       continue;
     }
 
@@ -1853,26 +2268,36 @@ async function runGuiFolderIngest(api, cfg, caps, folder, titleId) {
       const args = buildFfmpegArgs(cfg, m.file.abs, hlsDir, caps);
       const fileBase = (i / matches.length);
       const fileShare = 1 / matches.length;
+      ingestState.currentFile.phase = 'transcoding';
       await runFfmpegWithProgress(cfg, args, durationSec || 0, (pct) => {
-        // This file's ffmpeg contributes the first 90% of its share of
-        // overall progress. Uploads fill in the last 10%.
-        ingestState.progress = fileBase + pct * 0.90 * fileShare;
-        api.progress(job.jobId, Math.max(0, Math.min(0.9, pct * 0.90))).catch(() => {});
+        const filePct = Math.max(0, Math.min(0.9, pct * 0.90));
+        ingestState.currentFile.progress = filePct;
+        ingestState.progress = fileBase + filePct * fileShare;
+        api.progress(job.jobId, filePct).catch(() => {});
       }, (child) => { ingestState.childFfmpeg = child; });
 
+      ingestState.currentFile.phase = 'uploading';
       const { totalBytes } = await uploadHlsTree(api, job.jobId, hlsDir, (done, total) => {
-        const localPct = 0.90 + (done / total) * 0.10;
-        ingestState.progress = fileBase + localPct * fileShare;
-        api.progress(job.jobId, Math.min(0.99, localPct)).catch(() => {});
+        const filePct = 0.90 + (done / total) * 0.10;
+        ingestState.currentFile.progress = filePct;
+        ingestState.progress = fileBase + filePct * fileShare;
+        api.progress(job.jobId, Math.min(0.99, filePct)).catch(() => {});
       });
       await api.complete(job.jobId, { durationSec, bytes: totalBytes });
       try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
       succeeded++;
+      ingestState.queue.succeeded = succeeded;
+      pushHistory({ rel: m.file.rel, status: 'done', durationMs: Date.now() - fileStart, bytes: totalBytes,
+        episode: `S${m.season}E${m.episode}` });
     } catch (e) {
       failed++;
+      ingestState.queue.failed = failed;
       warn(`folder-ingest: transcode failed for ${m.file.rel}: ${e.message}`);
       try { await api.fail(job.jobId, e.message, false); } catch { /* ignore */ }
+      pushHistory({ rel: m.file.rel, status: 'failed', durationMs: Date.now() - fileStart, bytes: 0,
+        episode: `S${m.season}E${m.episode}`, reason: 'transcode: ' + e.message });
     }
+    ingestState.queue.done = i + 1;
     ingestState.progress = (i + 1) / matches.length;
   }
 
@@ -1961,6 +2386,15 @@ async function cmdGui(api, cfg, caps) {
         return;
       }
       if (req.method === 'GET' && req.url === '/api/state') {
+        // ETA: based on queue pace so far. For single-file ingest, simple
+        // linear extrapolation from progress + elapsed.
+        const now = Date.now();
+        const startedAt = ingestState.startedAt || now;
+        const elapsedMs = Math.max(0, now - startedAt);
+        let etaMs = null;
+        if (ingestState.active && ingestState.progress > 0.02 && ingestState.progress < 1) {
+          etaMs = Math.round(elapsedMs * (1 - ingestState.progress) / ingestState.progress);
+        }
         sendJson(res, 200, {
           active: ingestState.active || (ingestState.phase === 'done' || ingestState.phase === 'error'),
           phase: ingestState.phase,
@@ -1970,6 +2404,11 @@ async function cmdGui(api, cfg, caps) {
           filePath: ingestState.filePath,
           encoder: ingestState.encoder,
           jobId: ingestState.jobId,
+          currentFile: ingestState.currentFile,
+          queue: ingestState.queue,
+          history: ingestState.history,
+          elapsedMs,
+          etaMs,
         });
         return;
       }
