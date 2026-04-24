@@ -489,26 +489,81 @@ function runFfmpegWithProgress(cfg, args, durationSec, onProgress, onSpawn) {
 
 // ---------- upload (worker → server for PUT url → R2) ----------
 
+/**
+ * Upload one file to R2 via a presigned PUT URL, with retry-on-transient.
+ *
+ * R2 (like any S3-compatible backend at scale) occasionally returns 5xx
+ * responses — most notably "502 InternalError: We encountered an internal
+ * connectivity issue. Please try again." On a queue of 279 files × ~150
+ * segments each, hitting one is statistically near-certain. Previously,
+ * any single 5xx failed the whole transcode for that file. Now we retry
+ * with exponential backoff + jitter.
+ *
+ * Retry policy:
+ *   - 5xx from R2: retry (assumed transient)
+ *   - 403 (possibly expired presign): fetch a fresh presigned URL and retry
+ *   - Network error (fetch threw): retry
+ *   - Other 4xx: treat as permanent, fail immediately
+ *
+ * Backoff: 500ms, 1s, 2s, 4s, 8s (+ up to 50% jitter). Max 5 retries =
+ * ~16s total worst case per file before giving up.
+ */
 async function uploadFile(api, jobId, localPath, relKey) {
-  const { url, contentType } = await api.uploadUrl(jobId, relKey);
+  const MAX_RETRIES = 5;
+  const { url: firstUrl, contentType } = await api.uploadUrl(jobId, relKey);
   const stat = fs.statSync(localPath);
-  // Use Node Readable → Web ReadableStream via fetch's `duplex: 'half'` so we
-  // don't slurp multi-GB segments into memory.
-  const stream = fs.createReadStream(localPath);
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': contentType,
-      'Content-Length': String(stat.size),
-    },
-    body: stream,
-    duplex: 'half',
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`PUT ${relKey} → ${res.status}: ${text.slice(0, 200)}`);
+  let currentUrl = firstUrl;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // fresh stream each attempt — streams can only be consumed once.
+    const stream = fs.createReadStream(localPath);
+    let res;
+    try {
+      res = await fetch(currentUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(stat.size),
+        },
+        body: stream,
+        duplex: 'half',
+      });
+    } catch (err) {
+      // Network error: retriable.
+      lastErr = err;
+      try { stream.destroy(); } catch { /* ignore */ }
+    }
+
+    if (res && res.ok) return { bytes: stat.size };
+
+    if (res) {
+      const status = res.status;
+      const text = await res.text().catch(() => '');
+      lastErr = new Error(`PUT ${relKey} → ${status}: ${text.slice(0, 200)}`);
+
+      // Permanent 4xx (except 403 which we retry with a fresh URL): give up.
+      if (status >= 400 && status < 500 && status !== 403 && status !== 408 && status !== 429) {
+        throw lastErr;
+      }
+      // 403 likely means the signed URL expired; ask for a fresh one before
+      // the next attempt. R2 also returns 403 SignatureDoesNotMatch for
+      // stream hiccups sometimes — a fresh sign round-trip handles both.
+      if (status === 403 && attempt < MAX_RETRIES) {
+        try {
+          const fresh = await api.uploadUrl(jobId, relKey);
+          currentUrl = fresh.url;
+        } catch { /* will retry with same URL on next attempt */ }
+      }
+    }
+
+    if (attempt >= MAX_RETRIES) break;
+    const baseDelay = 500 * Math.pow(2, attempt);
+    const jitter = baseDelay * 0.5 * Math.random();
+    await new Promise((r) => setTimeout(r, baseDelay + jitter));
   }
-  return { bytes: stat.size };
+
+  throw lastErr || new Error(`PUT ${relKey}: all retries exhausted`);
 }
 
 function walkFiles(dir) {
