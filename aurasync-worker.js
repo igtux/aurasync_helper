@@ -67,6 +67,14 @@ Usage:
   aurasync-worker ingest <file>      # transcode a LOCAL file → HLS → R2 (no round-trip)
     --title <titleId>                #   map to catalogue title (required)
     --episode <episodeId>            #   map to episode (optional; series only)
+  aurasync-worker scan <folder>      # dry-run: show what files in <folder> would match
+    --title <titleId>                #   scope matches to one title (optional)
+  aurasync-worker ingest-folder <folder>
+                                     # walk <folder>, match files to episodes, queue each
+                                     #   serially. Parses SxxExx + parent-dir-season; with
+                                     #   --title it can also resolve absolute-episode nums
+                                     #   (e.g. "Naruto 207.mkv" → S9E13).
+    --title <titleId>                #   scope matches to one title (optional)
   aurasync-worker gui                # local browser GUI for picking + fulfilling requests
     --port <port>                    #   default 4849
     --inbox <dir>                    #   folder of local video files to choose from
@@ -238,6 +246,9 @@ function makeApi(cfg) {
       call('POST', `/api/workers/jobs/${encodeURIComponent(jobId)}/fail`, { error: String(reason), permanent: !!permanent }),
     listRequests: () => call('GET', '/api/workers/requests'),
     ingestLocal: (body) => call('POST', '/api/workers/ingest-local', body),
+    // v2: fetch a title's full episode list so we can (a) ingest episodes
+    // without a pending request and (b) decode absolute-episode numbers.
+    listEpisodes: (titleId) => call('GET', `/api/workers/titles/${encodeURIComponent(titleId)}/episodes`),
   };
 }
 
@@ -698,6 +709,352 @@ async function cmdIngest(api, cfg, caps, filePath, titleId, episodeId) {
   }
 }
 
+// ---------- folder-ingest: scan + ingest-folder ----------
+
+const VIDEO_EXT_RE = /\.(mp4|mkv|mov|webm|m4v|avi|ts|flv|wmv)$/i;
+
+/**
+ * Parse a video filename into { season, episode } or null.
+ * Recognised patterns (in priority order):
+ *   S01E02, s1e2, S01.E02, S01_E02         — explicit SxxExx
+ *   Season 1 Episode 2, Season_01_Ep02     — verbose form
+ *   1x02                                   — season x episode
+ *   Episode 12, Ep12, EP.12                — season-less, assume 1
+ *   E12, ep012                             — same
+ *   Show_12.mkv                            — trailing number before ext (season 1)
+ *
+ * Absolute-episode numbers (e.g. "Naruto 207.mkv" meaning S9E13) are NOT
+ * parsed here — that needs a server lookup and ships in v2.
+ */
+function parseEpisodeFromFilename(name) {
+  const base = path.basename(name);
+  let m = /\bS(\d{1,3})[._\s-]?E(\d{1,4})\b/i.exec(base);
+  if (m) return { season: Number(m[1]), episode: Number(m[2]) };
+  m = /season[\s._-]?(\d{1,3})[^\d]{0,10}(episode|ep)[\s._-]?(\d{1,4})/i.exec(base);
+  if (m) return { season: Number(m[1]), episode: Number(m[3]) };
+  m = /\b(\d{1,2})x(\d{1,4})\b/i.exec(base);
+  if (m) return { season: Number(m[1]), episode: Number(m[2]) };
+  m = /\b(?:episode|ep)[\s._-]?(\d{1,4})\b/i.exec(base);
+  if (m) return { season: 1, episode: Number(m[1]) };
+  m = /\bE(\d{1,4})\b/i.exec(base);
+  if (m) return { season: 1, episode: Number(m[1]) };
+  m = /[-_.\s](\d{1,4})(?=\.[a-z0-9]+$)/i.exec(base);
+  if (m) return { season: 1, episode: Number(m[1]) };
+  return null;
+}
+
+/**
+ * Parent-dir-season parser. Walks up from the file's directory looking for a
+ * segment like "Season 1", "s01", "S3", "Saison 2" — so filenames that only
+ * contain an episode number (e.g. "Ep 07.mkv" in a `Season 3/` folder) still
+ * resolve correctly. Returns a season number or null.
+ */
+function seasonFromParentDirs(absPath, rootDir) {
+  const rel = path.relative(rootDir, absPath);
+  const parts = rel.split(/[\\/]+/).slice(0, -1); // drop the file itself
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const seg = parts[i];
+    const m = /^(?:season|saison|s)[\s._-]?(\d{1,3})\b/i.exec(seg);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+/**
+ * Walk a directory recursively, returning file metadata for every video file.
+ * Skips hidden dirs (`.git`, `.DS_Store`, etc.) and anything starting with `_`.
+ */
+function walkVideoFiles(rootDir) {
+  const out = [];
+  const stack = [rootDir];
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(cur, { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+      const p = path.join(cur, entry.name);
+      if (entry.isDirectory()) { stack.push(p); continue; }
+      if (!entry.isFile() || !VIDEO_EXT_RE.test(entry.name)) continue;
+      let stat; try { stat = fs.statSync(p); } catch { continue; }
+      out.push({ abs: p, rel: path.relative(rootDir, p).split(path.sep).join('/'), bytes: stat.size });
+    }
+  }
+  out.sort((a, b) => a.rel.localeCompare(b.rel, undefined, { numeric: true }));
+  return out;
+}
+
+/**
+ * Try to extract a trailing/inline episode number from a filename that
+ * doesn't match SxxExx. Used for absolute-episode decoding in title-scope
+ * mode (v2).
+ */
+function extractBareEpisodeNumber(name) {
+  const base = path.basename(name);
+  // A number immediately before the extension: "Naruto_207.mkv", "Naruto - 207.mkv".
+  let m = /[-_.\s](\d{2,4})(?=\.[a-z0-9]+$)/i.exec(base);
+  if (m) return Number(m[1]);
+  // "Ep 207" / "Episode 207" / "E207"
+  m = /\b(?:episode|ep|e)[\s._-]?(\d{1,4})\b/i.exec(base);
+  if (m) return Number(m[1]);
+  return null;
+}
+
+/**
+ * Match mode A — against pending requests (v1; used when no --title is passed).
+ * Returns a match descriptor or a reason-to-skip.
+ */
+function matchFileToRequest(file, rootDir, pendingRequests) {
+  let parsed = parseEpisodeFromFilename(file.rel);
+  const parentSeason = seasonFromParentDirs(file.abs, rootDir);
+  // If the filename gave us S=1 but the parent dir says otherwise, trust the
+  // parent dir — common for `Show/Season X/ep.mkv` layouts.
+  if (parsed && parentSeason != null && parsed.season === 1 && parentSeason !== 1) {
+    parsed = { season: parentSeason, episode: parsed.episode };
+  }
+  // Filename-only parse failed but parent has a season + name has an episode num.
+  if (!parsed && parentSeason != null) {
+    const epNum = extractBareEpisodeNumber(file.rel);
+    if (epNum != null) parsed = { season: parentSeason, episode: epNum };
+  }
+  if (!parsed) return { file, matched: false, reason: 'no S##E## pattern in filename or parent dir' };
+
+  const candidates = pendingRequests.filter((r) =>
+    r.episodeSeason === parsed.season && r.episodeNumber === parsed.episode
+  );
+  if (candidates.length === 0) {
+    return { file, matched: false, season: parsed.season, episode: parsed.episode,
+      reason: `no pending request for S${parsed.season}E${parsed.episode}` };
+  }
+  const uniqueTitles = new Set(candidates.map((c) => c.titleId));
+  if (uniqueTitles.size > 1) {
+    return { file, matched: false, season: parsed.season, episode: parsed.episode,
+      reason: `ambiguous — ${uniqueTitles.size} titles have pending S${parsed.season}E${parsed.episode}` };
+  }
+  const best = candidates.find((c) => c.episodeId) || candidates[0];
+  return {
+    file,
+    matched: true,
+    season: parsed.season,
+    episode: parsed.episode,
+    titleId: best.titleId,
+    episodeId: best.episodeId,
+    titleTitle: best.titleTitle,
+    episodeName: best.episodeName,
+  };
+}
+
+/**
+ * Match mode B — against the full episode list of ONE title (v2). Used when
+ * the admin passes `--title <titleId>`. Supports SxxExx, parent-dir-season,
+ * AND absolute-episode decoding (e.g. "Naruto 207" → S9E13).
+ *
+ * `episodesList` is `[{id, season, episode, name, absoluteIndex}]` sorted by
+ * (season, episode). `maxPerSeason` is computed once per folder scan —
+ * episode numbers larger than that can only be absolute, never per-season.
+ */
+function matchFileToTitleEpisode(file, rootDir, title, episodesList, maxPerSeason) {
+  const parsed = parseEpisodeFromFilename(file.rel);
+  const parentSeason = seasonFromParentDirs(file.abs, rootDir);
+
+  // Case 1: filename has SxxExx (or NxNN, Season X Episode Y). Strong signal.
+  if (parsed) {
+    let season = parsed.season;
+    let episode = parsed.episode;
+    if (parentSeason != null && season === 1 && parentSeason !== 1) season = parentSeason;
+    const ep = episodesList.find((e) => e.season === season && e.episode === episode);
+    if (ep) {
+      return { file, matched: true, season, episode,
+        titleId: title.id, episodeId: ep.id, titleTitle: title.title, episodeName: ep.name };
+    }
+    return { file, matched: false, season, episode,
+      reason: `no S${season}E${episode} in ${title.title}'s catalogue` };
+  }
+
+  // Case 2: no SxxExx. Try to extract a bare number.
+  const bare = extractBareEpisodeNumber(file.rel);
+  if (bare == null) {
+    return { file, matched: false, reason: 'no episode number found in filename' };
+  }
+
+  // Case 2a: parent dir gives a season → treat the bare number as per-season.
+  if (parentSeason != null) {
+    const ep = episodesList.find((e) => e.season === parentSeason && e.episode === bare);
+    if (ep) {
+      return { file, matched: true, season: parentSeason, episode: bare,
+        titleId: title.id, episodeId: ep.id, titleTitle: title.title, episodeName: ep.name };
+    }
+    // fall through to absolute attempt
+  }
+
+  // Case 2b: absolute-episode decode. If the number exceeds the largest
+  // per-season episode count, it can ONLY be absolute. If it's small enough
+  // to be per-season, prefer season 1 episode N if a parent-dir match failed.
+  if (bare > maxPerSeason) {
+    const ep = episodesList.find((e) => e.absoluteIndex === bare);
+    if (ep) {
+      return { file, matched: true, season: ep.season, episode: ep.episode,
+        titleId: title.id, episodeId: ep.id, titleTitle: title.title, episodeName: ep.name,
+        note: `absolute #${bare}`,
+      };
+    }
+    return { file, matched: false,
+      reason: `absolute episode ${bare} beyond ${title.title}'s range (${episodesList.length} total)` };
+  }
+
+  // Small number, no parent dir season, no SxxExx — try absolute first, then S1EX.
+  const absEp = episodesList.find((e) => e.absoluteIndex === bare);
+  const s1Ep = episodesList.find((e) => e.season === 1 && e.episode === bare);
+  const ep = absEp || s1Ep;
+  if (ep) {
+    return { file, matched: true, season: ep.season, episode: ep.episode,
+      titleId: title.id, episodeId: ep.id, titleTitle: title.title, episodeName: ep.name,
+      note: absEp ? `absolute #${bare}` : 'guessed S1',
+    };
+  }
+  return { file, matched: false, reason: `episode ${bare} not in ${title.title}'s catalogue` };
+}
+
+function renderScanSummary(matches, rootDir, mode) {
+  const ok = matches.filter((m) => m.matched);
+  const skip = matches.filter((m) => !m.matched);
+  console.log(`\nScanned ${rootDir}  (mode: ${mode})`);
+  console.log(`  ${matches.length} video file(s)  ·  ${ok.length} matched  ·  ${skip.length} skipped\n`);
+  if (ok.length) {
+    console.log('MATCHED (will ingest on `ingest-folder`):');
+    for (const m of ok) {
+      const ep = `S${m.season}E${m.episode}`;
+      const note = m.note ? ` [${m.note}]` : '';
+      console.log(`  ✓ ${m.file.rel}  →  ${ep}${note}  ${m.titleTitle || ''}`);
+    }
+    console.log('');
+  }
+  if (skip.length) {
+    console.log('SKIPPED:');
+    for (const m of skip) {
+      console.log(`  · ${m.file.rel}  —  ${m.reason}`);
+    }
+    console.log('');
+  }
+}
+
+/**
+ * Build the list of matches for the folder. When `titleId` is given we fetch
+ * that title's full episode list and match against it (v2 mode — supports
+ * absolute-episode decoding). Otherwise we match against the server's
+ * pending-request list (v1 mode).
+ */
+async function buildFolderMatches(api, folder, titleId) {
+  const abs = path.resolve(folder);
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+    throw new Error(`Not a directory: ${abs}`);
+  }
+  const files = walkVideoFiles(abs);
+  if (files.length === 0) return { abs, mode: 'empty', matches: [] };
+
+  if (titleId) {
+    // v2: scope to a single title; can decode absolute-episode.
+    let listRes;
+    try { listRes = await api.listEpisodes(titleId); }
+    catch (e) { throw new Error(`Could not fetch episodes for title ${titleId}: ${e.message}`); }
+    const episodes = listRes.episodes || [];
+    if (episodes.length === 0) {
+      throw new Error(`Title ${titleId} has no episodes synced. Run "Sync from TMDB" on its title page first.`);
+    }
+    const title = { id: titleId, title: listRes.titleTitle || '(unknown)' };
+    // Max episodes-per-season decides when a bare number is definitely absolute.
+    const perSeasonCounts = new Map();
+    for (const e of episodes) {
+      perSeasonCounts.set(e.season, (perSeasonCounts.get(e.season) || 0) + 1);
+    }
+    const maxPerSeason = Math.max(...perSeasonCounts.values(), 0);
+    const matches = files.map((f) => matchFileToTitleEpisode(f, abs, title, episodes, maxPerSeason));
+    return { abs, mode: `title-scope (${title.title}, ${episodes.length} eps)`, matches };
+  }
+
+  // v1: match against pending requests.
+  const r = await api.listRequests();
+  const pending = r.requests || [];
+  const matches = files.map((f) => matchFileToRequest(f, abs, pending));
+  return { abs, mode: `pending-requests (${pending.length} open)`, matches };
+}
+
+async function cmdScan(api, folder, titleId) {
+  if (!folder) {
+    console.error('Missing folder. Usage: aurasync-worker scan <folder> [--title <uuid>]');
+    process.exit(2);
+  }
+  let result;
+  try { result = await buildFolderMatches(api, folder, titleId); }
+  catch (e) { console.error(e.message); process.exit(2); }
+  if (result.mode === 'empty') { console.log(`No video files found in ${result.abs}.`); return; }
+  renderScanSummary(result.matches, result.abs, result.mode);
+}
+
+async function cmdIngestFolder(api, cfg, caps, folder, titleId) {
+  if (!folder) {
+    console.error('Missing folder. Usage: aurasync-worker ingest-folder <folder> [--title <uuid>]');
+    process.exit(2);
+  }
+  // Register so the server sees us online.
+  try { await api.register(caps); }
+  catch (e) { console.error(`register failed: ${e.message}`); process.exit(3); }
+
+  let result;
+  try { result = await buildFolderMatches(api, folder, titleId); }
+  catch (e) { console.error(e.message); process.exit(2); }
+  if (result.mode === 'empty') { console.log(`No video files found in ${result.abs}.`); return; }
+  renderScanSummary(result.matches, result.abs, result.mode);
+
+  const ok = result.matches.filter((m) => m.matched);
+  if (ok.length === 0) {
+    console.log('Nothing to ingest — no files matched.');
+    if (!titleId) console.log('(Without --title, only episodes with pending requests are matched. Pass --title <uuid> to ingest into a title directly.)');
+    return;
+  }
+
+  // Serial queue. NVENC is 100% during a transcode; parallel would thrash.
+  // Upload-within-a-file is already 12-way parallel (see runLocalIngestJob).
+  console.log(`\n=== ingesting ${ok.length} file(s) serially ===\n`);
+  let done = 0, failed = 0;
+  const failures = [];
+  for (const m of ok) {
+    done++;
+    const label = `[${done}/${ok.length}] S${m.season}E${m.episode} · ${m.file.rel}`;
+    console.log(label);
+    const stat = fs.statSync(m.file.abs);
+    let job;
+    try {
+      job = await api.ingestLocal({
+        titleId: m.titleId,
+        episodeId: m.episodeId || null,
+        filename: path.basename(m.file.abs),
+        bytes: stat.size,
+      });
+    } catch (e) {
+      failed++; failures.push({ file: m.file.rel, reason: 'ingest-local: ' + e.message });
+      warn(`  ingest-local failed: ${e.message} — skipping`);
+      continue;
+    }
+    try {
+      await runLocalIngestJob(api, cfg, job, m.file.abs, caps);
+      log(`  ✓ done`);
+    } catch (e) {
+      failed++; failures.push({ file: m.file.rel, reason: 'transcode: ' + e.message });
+      warn(`  transcode failed: ${e.message} — skipping to next`);
+      try { await api.fail(job.jobId, e.message, false); } catch { /* ignore */ }
+    }
+  }
+
+  console.log(`\n=== folder ingest summary ===`);
+  console.log(`  ${ok.length - failed} succeeded · ${failed} failed · ${result.matches.length - ok.length} skipped (no match)`);
+  if (failures.length) {
+    console.log('\nFailures:');
+    for (const f of failures) console.log(`  · ${f.file}  —  ${f.reason}`);
+  }
+}
+
 // ---------- local GUI (http://127.0.0.1:<port>) ----------
 
 /**
@@ -794,6 +1151,68 @@ const GUI_HTML = `<!doctype html>
   }
   .inbox-config code { font-family: ui-monospace, monospace; color: var(--text); background: rgba(255,255,255,0.04); padding: 2px 6px; border-radius: 4px; }
   .inbox-config input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 5px 8px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+
+  /* Right-column tabs (Files / Folder) */
+  .right-tabs {
+    display: flex; gap: 4px; padding: 8px 12px 0;
+    border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
+  }
+  .right-tab {
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    padding: 6px 14px; border-radius: 6px 6px 0 0; font-size: 12px;
+    font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .right-tab:hover { color: var(--text); }
+  .right-tab.active {
+    color: var(--text); border-bottom-color: var(--accent);
+  }
+  .right-tab-panel[hidden] { display: none; }
+
+  /* Folder panel */
+  .folder-controls {
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
+    border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
+  }
+  .folder-controls label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .folder-controls input, .folder-controls select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    padding: 7px 10px; border-radius: 6px; font-size: 13px;
+    font-family: ui-monospace, monospace;
+  }
+  .folder-controls select { font-family: inherit; }
+  .folder-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .folder-actions button {
+    padding: 7px 14px; border: 1px solid var(--border); background: var(--panel);
+    color: var(--text); border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .folder-actions button.primary {
+    background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #000;
+    border: none; font-weight: 600;
+  }
+  .folder-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .folder-summary {
+    padding: 10px 16px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
+  }
+  .folder-summary:empty { display: none; }
+  .folder-summary .ok { color: var(--ok); }
+  .folder-summary .warn { color: var(--warn); }
+  #folder-results .row { display: block; }
+  #folder-results .row .file { font-family: ui-monospace, monospace; font-size: 12px; }
+  #folder-results .row.matched .file { color: var(--text); }
+  #folder-results .row.skipped .file { color: var(--muted); text-decoration: line-through; opacity: 0.7; }
+  #folder-results .row .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  #folder-results .row.matched .meta .tag {
+    background: rgba(0,245,160,0.15); color: var(--ok);
+    padding: 1px 6px; border-radius: 999px; font-size: 10px; margin-right: 4px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  #folder-results .row.skipped .meta .tag {
+    background: rgba(138,138,160,0.15); color: var(--muted);
+    padding: 1px 6px; border-radius: 999px; font-size: 10px; margin-right: 4px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
 </style>
 </head>
 <body>
@@ -817,19 +1236,41 @@ const GUI_HTML = `<!doctype html>
   </section>
 
   <section>
-    <h2>
-      <span>Local files</span>
-      <span class="count" id="file-count">–</span>
-      <span class="spacer"></span>
-      <input type="text" id="filter" placeholder="filter filenames…">
-      <button id="refresh-files">Refresh</button>
-    </h2>
-    <div class="inbox-config">
-      Inbox:
-      <input id="inbox-path" value="">
-      <button id="save-inbox">Save</button>
+    <div class="right-tabs" role="tablist">
+      <button class="right-tab active" data-tab="files" role="tab">Files</button>
+      <button class="right-tab" data-tab="folder" role="tab">Folder</button>
     </div>
-    <div class="list" id="files"></div>
+
+    <div id="tab-files" class="right-tab-panel">
+      <h2>
+        <span>Local files</span>
+        <span class="count" id="file-count">–</span>
+        <span class="spacer"></span>
+        <input type="text" id="filter" placeholder="filter filenames…">
+        <button id="refresh-files">Refresh</button>
+      </h2>
+      <div class="inbox-config">
+        Inbox:
+        <input id="inbox-path" value="">
+        <button id="save-inbox">Save</button>
+      </div>
+      <div class="list" id="files"></div>
+    </div>
+
+    <div id="tab-folder" class="right-tab-panel" hidden>
+      <div class="folder-controls">
+        <label>Folder</label>
+        <input id="folder-path" placeholder="C:\\TV\\The Big Bang Theory" />
+        <label>Title scope (optional)</label>
+        <select id="folder-title"><option value="">— any pending request —</option></select>
+        <div class="folder-actions">
+          <button id="folder-scan">Scan</button>
+          <button id="folder-ingest" class="primary" disabled>Ingest matched →</button>
+        </div>
+      </div>
+      <div class="folder-summary" id="folder-summary"></div>
+      <div class="list" id="folder-results"></div>
+    </div>
   </section>
 </main>
 
@@ -865,6 +1306,16 @@ const GUI_HTML = `<!doctype html>
     pickedReq: null,
     pickedFile: null,
     ingestRunning: false,
+    // Folder-ingest panel state
+    folder: {
+      path: '',
+      titleId: '',
+      scanning: false,
+      matches: [],
+      mode: '',
+      ingesting: false,
+    },
+    activeRightTab: 'files',  // 'files' | 'folder'
   };
 
   const $ = (id) => document.getElementById(id);
@@ -1073,6 +1524,121 @@ const GUI_HTML = `<!doctype html>
     try { await api('/api/cancel', { method: 'POST' }); } catch {}
   };
 
+  // ---- Right-column tab toggle + Folder-ingest panel ----
+  document.querySelectorAll('.right-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const name = tab.dataset.tab;
+      state.activeRightTab = name;
+      document.querySelectorAll('.right-tab').forEach((t) =>
+        t.classList.toggle('active', t.dataset.tab === name));
+      $('tab-files').hidden = name !== 'files';
+      $('tab-folder').hidden = name !== 'folder';
+      if (name === 'folder' && state.requests.length === 0) {
+        // surface pending-request titles in the scope dropdown lazily
+        void loadRequests();
+      }
+      if (name === 'folder') populateTitleScope();
+    });
+  });
+
+  function populateTitleScope() {
+    const sel = $('folder-title');
+    const curVal = sel.value;
+    const seen = new Map();
+    for (const r of state.requests) {
+      if (r.titleId && !seen.has(r.titleId)) seen.set(r.titleId, r.titleTitle || r.titleId.slice(0, 8));
+    }
+    sel.innerHTML = '<option value="">— any pending request —</option>' +
+      Array.from(seen.entries()).map(([id, name]) =>
+        '<option value="' + esc(id) + '">' + esc(name) + '</option>'
+      ).join('');
+    if (curVal && seen.has(curVal)) sel.value = curVal;
+  }
+
+  async function folderScan() {
+    const p = $('folder-path').value.trim();
+    if (!p) return;
+    state.folder.path = p;
+    state.folder.titleId = $('folder-title').value || '';
+    state.folder.scanning = true;
+    $('folder-scan').disabled = true;
+    $('folder-ingest').disabled = true;
+    $('folder-summary').innerHTML = 'Scanning…';
+    $('folder-results').innerHTML = '';
+    try {
+      const r = await api('/api/folder-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: p, titleId: state.folder.titleId || null }),
+      });
+      state.folder.matches = r.matches || [];
+      state.folder.mode = r.mode || '';
+      renderFolderResults();
+    } catch (e) {
+      $('folder-summary').innerHTML = '<span class="warn">' + esc(e.message) + '</span>';
+      state.folder.matches = [];
+    } finally {
+      state.folder.scanning = false;
+      $('folder-scan').disabled = false;
+    }
+  }
+
+  function renderFolderResults() {
+    const matches = state.folder.matches;
+    const ok = matches.filter((m) => m.matched);
+    const skip = matches.filter((m) => !m.matched);
+    $('folder-summary').innerHTML =
+      '<span class="ok">' + ok.length + ' match' + (ok.length === 1 ? '' : 'es') + '</span>' +
+      ' · <span class="warn">' + skip.length + ' skipped</span>' +
+      ' · mode: ' + esc(state.folder.mode);
+    $('folder-ingest').disabled = ok.length === 0 || state.folder.ingesting;
+    if (matches.length === 0) {
+      $('folder-results').innerHTML = '<div class="empty">No video files.</div>';
+      return;
+    }
+    // Show matched first, then skipped
+    const rows = [...ok, ...skip];
+    $('folder-results').innerHTML = rows.map((m) => {
+      const cls = m.matched ? 'matched' : 'skipped';
+      const tag = m.matched
+        ? '<span class="tag">S' + m.season + 'E' + m.episode + (m.note ? ' ' + esc(m.note) : '') + '</span>'
+        : '<span class="tag">skip</span>';
+      const meta = m.matched
+        ? (esc(m.titleTitle || '') + (m.episodeName ? ' · ' + esc(m.episodeName) : ''))
+        : esc(m.reason || '');
+      return '<div class="row ' + cls + '">' +
+        '<div class="file">' + esc(m.file.rel) + '</div>' +
+        '<div class="meta">' + tag + meta + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  async function folderIngest() {
+    const ok = state.folder.matches.filter((m) => m.matched);
+    if (ok.length === 0) return;
+    if (!confirm('Ingest ' + ok.length + ' file' + (ok.length === 1 ? '' : 's') + ' serially? Transcode will run one at a time.')) return;
+    state.folder.ingesting = true;
+    state.ingestRunning = true;
+    $('folder-ingest').disabled = true;
+    showProgress(true, state.folder.path.split(/[\\/]+/).pop() || 'folder', ok.length + ' file(s)');
+    try {
+      await api('/api/folder-ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: state.folder.path, titleId: state.folder.titleId || null }),
+      });
+      pollStatus();
+    } catch (e) {
+      showError(e.message);
+      state.folder.ingesting = false;
+      state.ingestRunning = false;
+    }
+  }
+
+  $('folder-scan').onclick = folderScan;
+  $('folder-ingest').onclick = folderIngest;
+  $('folder-title').addEventListener('change', () => { state.folder.titleId = $('folder-title').value || ''; });
+
   // Initial load + polling.
   loadRequests();
   loadFiles();
@@ -1205,6 +1771,108 @@ async function runGuiIngestJob(api, cfg, caps, filePath, titleId, episodeId, tit
   }
 }
 
+/**
+ * Folder-ingest driver for the GUI. Scans the folder, then runs matched
+ * files through runLocalIngestJob serially. Updates ingestState between
+ * each file so the GUI's progress overlay shows overall queue progress
+ * (N/M files) alongside the current file's transcode + upload %.
+ */
+async function runGuiFolderIngest(api, cfg, caps, folder, titleId) {
+  let result;
+  try { result = await buildFolderMatches(api, folder, titleId); }
+  catch (e) {
+    ingestState.active = true;
+    ingestState.phase = 'error';
+    ingestState.error = e.message;
+    ingestState.active = false;
+    return;
+  }
+  const matches = (result.matches || []).filter((m) => m.matched);
+  if (matches.length === 0) {
+    ingestState.active = true;
+    ingestState.phase = 'error';
+    ingestState.error = 'No matched files in folder — nothing to ingest.';
+    ingestState.active = false;
+    return;
+  }
+
+  ingestState.active = true;
+  ingestState.titleId = null;
+  ingestState.episodeId = null;
+  ingestState.titleName = `Folder · ${matches.length} file${matches.length === 1 ? '' : 's'}`;
+  ingestState.filePath = folder;
+  ingestState.progress = 0;
+  ingestState.phase = 'starting';
+  ingestState.error = null;
+  ingestState.encoder = caps.picked;
+  ingestState.startedAt = Date.now();
+
+  let succeeded = 0;
+  let failed = 0;
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    const stat = fs.statSync(m.file.abs);
+    ingestState.phase = `file ${i + 1}/${matches.length} · S${m.season}E${m.episode}`;
+    ingestState.titleId = m.titleId;
+    ingestState.episodeId = m.episodeId || null;
+    ingestState.filePath = m.file.abs;
+
+    let job;
+    try {
+      job = await api.ingestLocal({
+        titleId: m.titleId,
+        episodeId: m.episodeId || null,
+        filename: path.basename(m.file.abs),
+        bytes: stat.size,
+      });
+      ingestState.jobId = job.jobId;
+    } catch (e) {
+      failed++;
+      warn(`folder-ingest: ingest-local failed for ${m.file.rel}: ${e.message}`);
+      continue;
+    }
+
+    try {
+      const workDir = path.join(cfg.tmpDir, job.jobId);
+      fs.mkdirSync(workDir, { recursive: true });
+      const hlsDir = path.join(workDir, 'hls');
+      fs.mkdirSync(hlsDir, { recursive: true });
+      for (const v of ['v1080p']) fs.mkdirSync(path.join(hlsDir, v), { recursive: true });
+
+      const durationSec = ffprobeDurationSec(cfg, m.file.abs);
+      const args = buildFfmpegArgs(cfg, m.file.abs, hlsDir, caps);
+      const fileBase = (i / matches.length);
+      const fileShare = 1 / matches.length;
+      await runFfmpegWithProgress(cfg, args, durationSec || 0, (pct) => {
+        // This file's ffmpeg contributes the first 90% of its share of
+        // overall progress. Uploads fill in the last 10%.
+        ingestState.progress = fileBase + pct * 0.90 * fileShare;
+        api.progress(job.jobId, Math.max(0, Math.min(0.9, pct * 0.90))).catch(() => {});
+      }, (child) => { ingestState.childFfmpeg = child; });
+
+      const { totalBytes } = await uploadHlsTree(api, job.jobId, hlsDir, (done, total) => {
+        const localPct = 0.90 + (done / total) * 0.10;
+        ingestState.progress = fileBase + localPct * fileShare;
+        api.progress(job.jobId, Math.min(0.99, localPct)).catch(() => {});
+      });
+      await api.complete(job.jobId, { durationSec, bytes: totalBytes });
+      try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      succeeded++;
+    } catch (e) {
+      failed++;
+      warn(`folder-ingest: transcode failed for ${m.file.rel}: ${e.message}`);
+      try { await api.fail(job.jobId, e.message, false); } catch { /* ignore */ }
+    }
+    ingestState.progress = (i + 1) / matches.length;
+  }
+
+  ingestState.progress = 1;
+  ingestState.phase = 'done';
+  ingestState.titleName = `Folder · ${succeeded} succeeded, ${failed} failed`;
+  ingestState.active = false;
+  ingestState.childFfmpeg = null;
+}
+
 async function cmdGui(api, cfg, caps) {
   const args = parseArgs();
   const port = args.port || cfg.port || 4849;
@@ -1302,6 +1970,37 @@ async function cmdGui(api, cfg, caps) {
         sendJson(res, 200, { ok: true });
         return;
       }
+      if (req.method === 'POST' && req.url === '/api/folder-scan') {
+        const body = await readJsonBody(req);
+        const folder = String(body.folder || '').trim();
+        const scopeTitleId = body.titleId ? String(body.titleId) : null;
+        if (!folder) { sendJson(res, 400, { error: 'missing folder' }); return; }
+        try {
+          const result = await buildFolderMatches(api, folder, scopeTitleId);
+          sendJson(res, 200, {
+            abs: result.abs,
+            mode: result.mode,
+            matches: result.matches,
+          });
+        } catch (e) {
+          sendJson(res, 400, { error: e.message });
+        }
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/api/folder-ingest') {
+        if (ingestState.active) { sendJson(res, 409, { error: 'another ingest is already running' }); return; }
+        const body = await readJsonBody(req);
+        const folder = String(body.folder || '').trim();
+        const scopeTitleId = body.titleId ? String(body.titleId) : null;
+        if (!folder) { sendJson(res, 400, { error: 'missing folder' }); return; }
+        // Kick off the queue in the background; ingestState is updated as
+        // each file runs so /api/state shows progress the same way single-
+        // file ingests do. The client polls /api/state until phase === 'done'.
+        runGuiFolderIngest(api, cfg, caps, folder, scopeTitleId)
+          .catch((e) => { ingestState.phase = 'error'; ingestState.error = e.message; ingestState.active = false; });
+        sendJson(res, 202, { accepted: true });
+        return;
+      }
       res.writeHead(404); res.end('not found');
     } catch (e) {
       sendJson(res, 500, { error: e.message });
@@ -1368,6 +2067,16 @@ async function main() {
     // positional[0]='ingest', positional[1]=<file>
     const filePath = args.positional[1];
     await cmdIngest(api, cfg, caps, filePath, args.titleId, args.episodeId);
+    process.exit(0);
+  }
+  if (sub === 'scan') {
+    const folder = args.positional[1];
+    await cmdScan(api, folder, args.titleId);
+    process.exit(0);
+  }
+  if (sub === 'ingest-folder') {
+    const folder = args.positional[1];
+    await cmdIngestFolder(api, cfg, caps, folder, args.titleId);
     process.exit(0);
   }
   if (sub === 'gui') {

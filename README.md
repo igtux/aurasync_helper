@@ -36,7 +36,7 @@ node aurasync-worker.js --server https://aurasync.erpaura.ge --token aw_... --na
 node aurasync-worker.js
 ```
 
-### Three modes: **poll**, **local ingest**, **GUI**
+### Four modes: **poll**, **local ingest**, **folder ingest**, **GUI**
 
 The worker supports three ways of getting work:
 
@@ -53,7 +53,22 @@ node aurasync-worker.js ingest /path/to/movie.mkv --title <titleId>
 node aurasync-worker.js ingest /path/to/s1e2.mkv --title <titleId> --episode <episodeId>
 ```
 
-**GUI mode** — same idea as local ingest but driven from a tiny local web page. No more copy-pasting UUIDs on the command line:
+**Folder ingest** — point the worker at a whole TV season / show directory. It walks the folder, parses `S##E##` filenames (and `Season X/Ep Y` layouts), matches each file to a pending request or a title you specify, and queues them up **serially**. Transcode runs one file at a time (NVENC pins at 100% anyway; parallel transcodes would just thrash), while uploads-within-a-file stay 12-way parallel.
+
+```bash
+# Dry-run: see what would match
+node aurasync-worker.js scan /path/to/TV/the-big-bang-theory
+
+# Run it: match against pending requests only
+node aurasync-worker.js ingest-folder /path/to/TV/the-big-bang-theory
+
+# Run it: scope to one title — ingests EVERY episode in the folder, not just
+# the ones users have requested. Also enables absolute-episode decoding for
+# anime: "Naruto 207.mkv" → S9E13.
+node aurasync-worker.js ingest-folder /path/to/Anime/Naruto --title <titleId>
+```
+
+**GUI mode** — same idea as local ingest but driven from a tiny local web page. Includes a "Folder" tab that mirrors the above CLI: paste a folder path, optionally pick a title scope, hit Scan → Ingest matched. No more copy-pasting UUIDs on the command line:
 
 ```bash
 node aurasync-worker.js gui [--port 4849] [--inbox ~/aurasync-inbox]
