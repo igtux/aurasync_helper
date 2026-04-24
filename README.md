@@ -36,13 +36,13 @@ node aurasync-worker.js --server https://aurasync.erpaura.ge --token aw_... --na
 node aurasync-worker.js
 ```
 
-### Two modes: **poll** vs **local ingest**
+### Three modes: **poll**, **local ingest**, **GUI**
 
-The worker supports two ways of getting work:
+The worker supports three ways of getting work:
 
 **Poll mode (default)** — the worker claims any queued transcode job from the server. Sources for poll-mode jobs live in R2 (e.g. when an admin uploaded a movie via the browser). The worker downloads the source from R2, transcodes, uploads HLS back to R2.
 
-**Local ingest** — the source file is already on the worker's disk (you downloaded it locally, or it came from a NAS/share). Skip the R2 round-trip entirely:
+**Local ingest (CLI)** — the source file is already on the worker's disk (you downloaded it locally, or it came from a NAS/share). Skip the R2 round-trip entirely:
 
 ```bash
 # See what the server is waiting for
@@ -53,7 +53,22 @@ node aurasync-worker.js ingest /path/to/movie.mkv --title <titleId>
 node aurasync-worker.js ingest /path/to/s1e2.mkv --title <titleId> --episode <episodeId>
 ```
 
-Local ingest never copies the source anywhere — ffmpeg reads it in place, and only the HLS output is pushed to R2. Useful when the worker and the source share a disk (same machine, or a mounted NAS).
+**GUI mode** — same idea as local ingest but driven from a tiny local web page. No more copy-pasting UUIDs on the command line:
+
+```bash
+node aurasync-worker.js gui [--port 4849] [--inbox ~/aurasync-inbox]
+```
+
+Opens `http://127.0.0.1:4849` in your default browser. Two columns:
+
+- **Pending requests** (left) — live list from the server. Click to select one.
+- **Local files** (right) — contents of the configured *inbox* folder. Drop `.mp4`/`.mkv`/etc. files in the inbox, click Refresh in the GUI. Click a file to select.
+
+Both picked? Hit **Fulfill →**. A progress overlay shows the transcode % in real time (reading ffmpeg's own progress pipe) and then the upload %. When it's done the title flips to `available` and the matching request disappears from the list.
+
+Security: the GUI server binds to `127.0.0.1` only — not reachable from the LAN or the internet. The worker token never leaves this process.
+
+Local ingest (both CLI and GUI) never copies the source anywhere — ffmpeg reads it in place, and only the HLS output is pushed to R2. Useful when the worker and the source share a disk (same machine, or a mounted NAS).
 
 Environment variables also work: `AURASYNC_SERVER`, `AURASYNC_WORKER_TOKEN`.
 

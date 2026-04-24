@@ -164,6 +164,26 @@ The source file stays on this machine the entire time. The user's internet uploa
 
 **If poll mode is already running** (e.g., the worker started as a Windows service), `ingest` still works: both modes share the same token and the server tracks each job separately. You can run `ingest` from a second terminal while poll mode keeps running in the first.
 
+## Step 9 — GUI mode (optional; nicer for non-CLI users)
+
+If the user prefers clicking over typing UUIDs, start the GUI:
+
+```powershell
+node aurasync-worker.js gui
+```
+
+This opens `http://127.0.0.1:4849` in their default browser. The page has two columns:
+
+1. **Pending requests** — click to select which title the upcoming ingest will fulfill.
+2. **Local files** — a listing of video files inside the "inbox" folder (default: `%USERPROFILE%\aurasync-inbox`; configurable via the field at the top of the files column or `--inbox <dir>`).
+
+Both picked → click **Fulfill →** → a progress overlay shows live transcode + upload %. When done, the title is marked available and the request disappears from the list.
+
+Notes:
+- The GUI's HTTP server binds to **127.0.0.1 only**. It's not reachable from the LAN or internet. The worker token never leaves the process.
+- GUI mode can coexist with poll mode on the same machine; they share the same token but the server tracks each job separately. But only one ingest runs at a time (single ffmpeg process per worker).
+- If the user wants the GUI to start at login instead of the poll-mode service, configure the NSSM service (or Task Scheduler entry) to run `aurasync-worker.js gui` instead of plain `aurasync-worker.js`.
+
 ## Troubleshooting reference
 
 | Symptom | Likely cause | Fix |
