@@ -293,7 +293,17 @@ function ffprobeDurationSec(cfg, srcPath) {
 // Shared tail: HLS muxer output. One variant (1080p) → one master + one media
 // playlist. We keep the master + v1080p/ layout even for a single rendition
 // so the server-side playlist rewriter doesn't need to special-case it.
+//
+// IMPORTANT: on Windows, path.join uses '\'. ffmpeg writes whatever separator
+// is in its argv straight into the emitted master playlist — so we'd end up
+// with `v1080p\index.m3u8` as a variant URI, which iOS's native HLS player
+// rejects (Chrome's hls.js normalizes it). Force POSIX separators here;
+// Windows ffmpeg accepts '/' for disk paths just fine.
+function posixJoin(...parts) {
+  return parts.join('/').replace(/[\\/]+/g, '/');
+}
 function hlsMuxerTail(outDir) {
+  const pOut = String(outDir).replace(/\\/g, '/');
   return [
     '-g', '48', '-keyint_min', '48',
     '-c:a', 'aac', '-ar', '48000', '-b:a', '128k',
@@ -302,10 +312,10 @@ function hlsMuxerTail(outDir) {
     '-hls_playlist_type', 'vod',
     '-hls_flags', 'independent_segments',
     '-hls_segment_type', 'mpegts',
-    '-hls_segment_filename', path.join(outDir, 'v%v', 'seg_%05d.ts'),
+    '-hls_segment_filename', posixJoin(pOut, 'v%v', 'seg_%05d.ts'),
     '-master_pl_name', 'master.m3u8',
     '-var_stream_map', 'v:0,a:0,name:1080p',
-    path.join(outDir, 'v%v', 'index.m3u8'),
+    posixJoin(pOut, 'v%v', 'index.m3u8'),
   ];
 }
 
