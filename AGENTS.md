@@ -198,7 +198,7 @@ Notes:
 ## Things you must NOT do
 
 - Do **not** commit `worker.config.json` to git — it contains the worker token.
-- Do **not** edit `aurasync-worker.js` to "improve" it. The protocol is fixed by the server. If the user reports a bug, file an issue, don't patch locally.
+- Do **not** change the client/server **protocol** in `aurasync-worker.js` (what endpoints are called, auth flow, message shapes) — that's fixed by the server. Bug fixes in the ffmpeg pipeline or UI are fine to upstream via pull request.
 - Do **not** run multiple workers from the same `worker.config.json` directory on the same machine — they'll race on the same token. If the user wants multiple workers per box (rare), use separate folders, each with its own token.
 - Do **not** share the worker token. If the user pastes it into chat, scrub it from any future references.
 

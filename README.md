@@ -114,6 +114,10 @@ On boot the worker runs `ffmpeg -encoders` and picks the first available of:
 
 A hardware encoder is ~5-10× faster than `libx264 -preset veryfast`. On NVIDIA, a 2-hour 1080p movie encodes in 5-10 minutes instead of 45+.
 
+**NVENC and QSV use a fully GPU-resident pipeline** — `-hwaccel_output_format cuda|qsv` keeps decoded frames in VRAM, `split` fans them out to three `scale_cuda`/`scale_qsv` filters, and NVENC/QSV consumes the scaled surfaces without ever crossing PCIe. Without this, decoded frames would round-trip to system RAM for CPU scaling, and CPU + PCIe become the bottleneck even though the encoder sits idle. If your ffmpeg build is missing `scale_cuda`/`scale_qsv` you'll see a "Filter not found" error — use a build that includes them (Gyan.FFmpeg `full` or `release-essentials` on Windows both do) or run with `--no-hw` to fall back to software.
+
+AMF and VideoToolbox currently use software scaling into a GPU encoder; the scale filters for those vendors are less broadly available and the gain is smaller anyway.
+
 ## Running as a background service (Windows)
 
 ### Option A — NSSM (Non-Sucking Service Manager)

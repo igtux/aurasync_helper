@@ -290,44 +290,12 @@ function ffprobeDurationSec(cfg, srcPath) {
   }
 }
 
-function buildFfmpegArgs(cfg, srcPath, outDir, caps) {
-  const enc = caps.picked || 'libx264';
-  const isSw = enc === 'libx264';
-  // Preset naming differs between software + GPU encoders.
-  const preset = isSw ? 'veryfast'
-    : enc === 'h264_nvenc' ? 'p4'      // NVENC: p1 fastest .. p7 slowest
-    : enc === 'h264_qsv'   ? 'veryfast'
-    : enc === 'h264_amf'   ? 'speed'
-    : /* videotoolbox */    null;
-
-  const args = [
-    '-y', '-hide_banner', '-loglevel', 'error',
-    '-progress', 'pipe:2', '-nostats',
-  ];
-
-  // Hardware decode where the encoder is hardware too (optional speed boost).
-  if (enc === 'h264_nvenc') args.push('-hwaccel', 'cuda');
-  else if (enc === 'h264_qsv') args.push('-hwaccel', 'qsv');
-
-  args.push('-i', srcPath,
-    '-map', '0:v:0', '-map', '0:v:0', '-map', '0:v:0',
-    '-map', '0:a:0?', '-map', '0:a:0?', '-map', '0:a:0?',
-    '-c:v', enc,
-  );
-  if (preset) args.push('-preset', preset);
-  if (isSw) args.push('-profile:v', 'main');
-  args.push(
-    '-pix_fmt', 'yuv420p',
-    '-sc_threshold', '0',
+// Shared tail: HLS muxer output. Same for every encoder branch below.
+function hlsMuxerTail(outDir) {
+  return [
     '-g', '48', '-keyint_min', '48',
-
-    '-s:v:0', '854x480',   '-b:v:0', '800k',  '-maxrate:v:0', '856k',  '-bufsize:v:0', '1200k',
-    '-s:v:1', '1280x720',  '-b:v:1', '2500k', '-maxrate:v:1', '2675k', '-bufsize:v:1', '3750k',
-    '-s:v:2', '1920x1080', '-b:v:2', '5000k', '-maxrate:v:2', '5350k', '-bufsize:v:2', '7500k',
-
     '-c:a', 'aac', '-ar', '48000',
     '-b:a:0', '96k', '-b:a:1', '128k', '-b:a:2', '128k',
-
     '-f', 'hls',
     '-hls_time', '6',
     '-hls_playlist_type', 'vod',
@@ -337,8 +305,125 @@ function buildFfmpegArgs(cfg, srcPath, outDir, caps) {
     '-master_pl_name', 'master.m3u8',
     '-var_stream_map', 'v:0,a:0,name:480p v:1,a:1,name:720p v:2,a:2,name:1080p',
     path.join(outDir, 'v%v', 'index.m3u8'),
+  ];
+}
+
+/**
+ * Fully-GPU pipeline for NVENC: decode → split → 3× scale_cuda → encode.
+ * Frames never leave VRAM. On a consumer GPU (RTX 3080 / 4070 class) this
+ * runs 3-5× faster than the PCIe-bouncing path because:
+ *
+ *   - without `-hwaccel_output_format cuda`, ffmpeg copies each decoded
+ *     frame to host RAM, does 3× CPU swscale, then uploads 3× to NVENC.
+ *     CPU + PCIe are the bottleneck even though NVENC itself is idle.
+ *
+ *   - WITH cuda output format + scale_cuda, the surface never touches
+ *     host memory. NVENC consumes CUDA frames directly.
+ *
+ * Requires ffmpeg built with both CUDA and the scale_cuda filter (Gyan's
+ * Windows "essentials" + "full" builds both have it; the static Linux
+ * builds shipped by johnvansickle do too).
+ */
+function buildNvencArgs(srcPath, outDir) {
+  return [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-progress', 'pipe:2', '-nostats',
+
+    // GPU decode AND keep decoded surfaces in VRAM.
+    '-hwaccel', 'cuda',
+    '-hwaccel_output_format', 'cuda',
+
+    '-i', srcPath,
+
+    // One decode → fan out to 3 scalers on-GPU.
+    '-filter_complex',
+    '[0:v]split=3[v0][v1][v2];' +
+    '[v0]scale_cuda=854:480[o0];' +
+    '[v1]scale_cuda=1280:720[o1];' +
+    '[v2]scale_cuda=1920:1080[o2]',
+
+    '-map', '[o0]', '-map', '[o1]', '-map', '[o2]',
+    '-map', '0:a:0?', '-map', '0:a:0?', '-map', '0:a:0?',
+
+    '-c:v', 'h264_nvenc',
+    '-preset', 'p4',           // p1 fastest .. p7 slowest. p4 balances well.
+    '-rc', 'vbr',
+    '-b:v:0', '800k',  '-maxrate:v:0', '856k',  '-bufsize:v:0', '1200k',
+    '-b:v:1', '2500k', '-maxrate:v:1', '2675k', '-bufsize:v:1', '3750k',
+    '-b:v:2', '5000k', '-maxrate:v:2', '5350k', '-bufsize:v:2', '7500k',
+
+    ...hlsMuxerTail(outDir),
+  ];
+}
+
+/** Intel QSV equivalent of the NVENC pipeline. scale_qsv + h264_qsv. */
+function buildQsvArgs(srcPath, outDir) {
+  return [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-progress', 'pipe:2', '-nostats',
+
+    '-hwaccel', 'qsv',
+    '-hwaccel_output_format', 'qsv',
+
+    '-i', srcPath,
+
+    '-filter_complex',
+    '[0:v]split=3[v0][v1][v2];' +
+    '[v0]scale_qsv=854:480[o0];' +
+    '[v1]scale_qsv=1280:720[o1];' +
+    '[v2]scale_qsv=1920:1080[o2]',
+
+    '-map', '[o0]', '-map', '[o1]', '-map', '[o2]',
+    '-map', '0:a:0?', '-map', '0:a:0?', '-map', '0:a:0?',
+
+    '-c:v', 'h264_qsv',
+    '-preset', 'veryfast',
+    '-b:v:0', '800k',  '-maxrate:v:0', '856k',  '-bufsize:v:0', '1200k',
+    '-b:v:1', '2500k', '-maxrate:v:1', '2675k', '-bufsize:v:1', '3750k',
+    '-b:v:2', '5000k', '-maxrate:v:2', '5350k', '-bufsize:v:2', '7500k',
+
+    ...hlsMuxerTail(outDir),
+  ];
+}
+
+/**
+ * Fallback software pipeline — used for libx264, h264_amf, h264_videotoolbox,
+ * and anywhere the GPU-resident filters aren't available. Does CPU scaling
+ * via swscale (-s:v:N); for h264_amf/h264_videotoolbox this still benefits
+ * from GPU encoding, just loses the zero-copy scale win.
+ */
+function buildSoftwareScaleArgs(srcPath, outDir, enc) {
+  const isSw = enc === 'libx264';
+  const preset = isSw ? 'veryfast'
+    : enc === 'h264_amf' ? 'speed'
+    : null; // videotoolbox has no preset
+  const args = [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-progress', 'pipe:2', '-nostats',
+    '-i', srcPath,
+    '-map', '0:v:0', '-map', '0:v:0', '-map', '0:v:0',
+    '-map', '0:a:0?', '-map', '0:a:0?', '-map', '0:a:0?',
+    '-c:v', enc,
+  ];
+  if (preset) args.push('-preset', preset);
+  if (isSw) args.push('-profile:v', 'main');
+  args.push(
+    '-pix_fmt', 'yuv420p',
+    '-sc_threshold', '0',
+    '-s:v:0', '854x480',   '-b:v:0', '800k',  '-maxrate:v:0', '856k',  '-bufsize:v:0', '1200k',
+    '-s:v:1', '1280x720',  '-b:v:1', '2500k', '-maxrate:v:1', '2675k', '-bufsize:v:1', '3750k',
+    '-s:v:2', '1920x1080', '-b:v:2', '5000k', '-maxrate:v:2', '5350k', '-bufsize:v:2', '7500k',
+    ...hlsMuxerTail(outDir),
   );
   return args;
+}
+
+function buildFfmpegArgs(cfg, srcPath, outDir, caps) {
+  const enc = caps.picked || 'libx264';
+  if (enc === 'h264_nvenc') return buildNvencArgs(srcPath, outDir);
+  if (enc === 'h264_qsv') return buildQsvArgs(srcPath, outDir);
+  // AMF, VideoToolbox, libx264 — CPU scale, encoder as chosen.
+  return buildSoftwareScaleArgs(srcPath, outDir, enc);
 }
 
 function runFfmpegWithProgress(cfg, args, durationSec, onProgress, onSpawn) {
