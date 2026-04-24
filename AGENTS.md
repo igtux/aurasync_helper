@@ -127,6 +127,43 @@ Create a task that triggers *At log on of any user* / *At system startup*, actio
 2. Their worker should show as **● online** with the right OS / cores / encoder.
 3. If they upload a test movie now, this worker should claim it within ~5 seconds. Watch the log file (`worker.log`) for `claimed job ...` and progress reports.
 
+## Step 8 — local ingest (skip the R2 round-trip)
+
+When the source file is already on **this machine** — which is common for "I downloaded this movie, want it in my catalogue" — don't upload it to R2 just for the worker to download it back. Use `ingest` instead:
+
+```powershell
+# 1. List what the server is waiting for.
+node aurasync-worker.js requests
+
+# Output is formatted like:
+#   Pirates of the Caribbean (2006)  [movie]
+#       title=6a2df9af-11a4-4ad6-aa18-1d44b8032747
+#       requested by toasty
+#
+#   Naruto  [anime] — S01E02 · Episode Two
+#       title=c3aaaa5a-2df1-4b60-acb5-6e6eac3a6b8a  episode=9734e9e9-...
+#       requested by toasty
+
+# 2. Pick one, feed it a local file.
+node aurasync-worker.js ingest "D:\Movies\Pirates.mkv" --title 6a2df9af-11a4-4ad6-aa18-1d44b8032747
+
+# For a specific episode:
+node aurasync-worker.js ingest "D:\Naruto\S01E02.mkv" \
+   --title c3aaaa5a-2df1-4b60-acb5-6e6eac3a6b8a \
+   --episode 9734e9e9-f686-49e8-afb0-65dd11fd5e3d
+```
+
+What `ingest` does:
+1. Registers the worker (idempotent — no-op if poll mode is already running).
+2. Asks the server to pre-claim a transcode job for `(title, episode)`.
+3. Runs ffmpeg directly on the local file (no download step).
+4. Uploads **only the HLS output** to R2 via per-file presigned PUTs.
+5. Marks the title `available` and flips pending requests to `fulfilled`.
+
+The source file stays on this machine the entire time. The user's internet upload bandwidth is used only for the transcoded HLS segments — about the same size as the source, but streamed incrementally while the bigger cost (encoding) runs in parallel.
+
+**If poll mode is already running** (e.g., the worker started as a Windows service), `ingest` still works: both modes share the same token and the server tracks each job separately. You can run `ingest` from a second terminal while poll mode keeps running in the first.
+
 ## Troubleshooting reference
 
 | Symptom | Likely cause | Fix |

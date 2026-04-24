@@ -29,7 +29,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
-const crypto = require('crypto');
 
 // ---------- config ----------
 
@@ -37,7 +36,7 @@ const HERE = path.dirname(process.argv[1] || process.cwd());
 const CONFIG_PATH = process.env.AURASYNC_WORKER_CONFIG || path.join(HERE, 'worker.config.json');
 
 function parseArgs() {
-  const out = {};
+  const out = { positional: [] };
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -48,7 +47,10 @@ function parseArgs() {
     else if (a === '--ffprobe') out.ffprobe = argv[++i];
     else if (a === '--tmp') out.tmpDir = argv[++i];
     else if (a === '--no-hw') out.noHw = true;
+    else if (a === '--title') out.titleId = argv[++i];
+    else if (a === '--episode') out.episodeId = argv[++i];
     else if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
+    else if (!a.startsWith('-')) out.positional.push(a);
   }
   return out;
 }
@@ -57,7 +59,14 @@ function printHelp() {
   console.log(`
 AuraSync remote transcoding worker.
 
-Options:
+Usage:
+  aurasync-worker [run]              # default: poll the server for queued jobs
+  aurasync-worker requests           # list pending title requests on the server
+  aurasync-worker ingest <file>      # transcode a LOCAL file → HLS → R2 (no round-trip)
+    --title <titleId>                #   map to catalogue title (required)
+    --episode <episodeId>            #   map to episode (optional; series only)
+
+Global options:
   --server <url>      AuraSync server base URL (e.g. https://aurasync.erpaura.ge)
   --token <token>     Worker token minted in the admin panel (shown once)
   --name <name>       Human-readable worker name (default: hostname)
@@ -69,6 +78,17 @@ Options:
 
 Config is persisted to worker.config.json next to this script on first run.
 Environment fallbacks: AURASYNC_SERVER, AURASYNC_WORKER_TOKEN.
+
+Examples:
+  aurasync-worker
+    Poll mode. Claim jobs queued on the server (source on R2).
+
+  aurasync-worker requests
+    Print a numbered list of pending title requests.
+
+  aurasync-worker ingest "D:\\Movies\\Pirates.mkv" --title 6a2df9af-...
+    Transcode the local file right here, upload only HLS to R2.
+    No re-download of the source from R2.
 `);
 }
 
@@ -202,6 +222,8 @@ function makeApi(cfg) {
     complete: (jobId, details) => call('POST', `/api/workers/jobs/${encodeURIComponent(jobId)}/complete`, details || {}),
     fail: (jobId, reason, permanent = false) =>
       call('POST', `/api/workers/jobs/${encodeURIComponent(jobId)}/fail`, { error: String(reason), permanent: !!permanent }),
+    listRequests: () => call('GET', '/api/workers/requests'),
+    ingestLocal: (body) => call('POST', '/api/workers/ingest-local', body),
   };
 }
 
@@ -436,6 +458,129 @@ async function runOneJob(api, cfg, job, caps) {
   log(`job ${jobId.slice(0, 8)} complete (${files.length} files, ${(totalBytes / 1024 / 1024).toFixed(1)} MB)`);
 }
 
+/**
+ * Local-ingest variant: the source file is already on this machine. Skip the
+ * R2 download and transcode in place. ffmpeg output still goes to a tmp dir,
+ * then gets uploaded to R2. The local source is NEVER copied or uploaded.
+ */
+async function runLocalIngestJob(api, cfg, job, localSrcPath, caps) {
+  const jobId = job.jobId;
+  const workDir = path.join(cfg.tmpDir, jobId);
+  fs.mkdirSync(workDir, { recursive: true });
+  const hlsDir = path.join(workDir, 'hls');
+  fs.mkdirSync(hlsDir, { recursive: true });
+  for (const v of ['v480p', 'v720p', 'v1080p']) {
+    fs.mkdirSync(path.join(hlsDir, v), { recursive: true });
+  }
+
+  // 1. (no download; source is local)
+  // 2. Probe + transcode (counts 0 → 90% this time; skipped the 10% download band)
+  const durationSec = ffprobeDurationSec(cfg, localSrcPath);
+  log(`probed duration=${durationSec || 'unknown'}s — encoder=${caps.picked}`);
+  const args = buildFfmpegArgs(cfg, localSrcPath, hlsDir, caps);
+  await runFfmpegWithProgress(cfg, args, durationSec || 0, (pct) => {
+    api.progress(jobId, pct * 0.90).catch(() => {});
+  });
+
+  // 3. Upload HLS output to R2.
+  const files = walkFiles(hlsDir);
+  log(`uploading ${files.length} HLS files`);
+  let totalBytes = 0;
+  for (let i = 0; i < files.length; i++) {
+    const abs = files[i];
+    const rel = path.relative(hlsDir, abs).split(path.sep).join('/');
+    const { bytes } = await uploadFile(api, jobId, abs, rel);
+    totalBytes += bytes;
+    const pct = 0.90 + ((i + 1) / files.length) * 0.10;
+    api.progress(jobId, Math.min(0.99, pct)).catch(() => {});
+  }
+
+  await api.complete(jobId, { durationSec, bytes: totalBytes });
+  try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  log(`local-ingest job ${jobId.slice(0, 8)} complete (${files.length} files, ${(totalBytes / 1024 / 1024).toFixed(1)} MB)`);
+}
+
+// ---------- subcommands: requests + ingest ----------
+
+async function cmdRequests(api) {
+  const r = await api.listRequests();
+  const rows = r.requests || [];
+  if (rows.length === 0) {
+    console.log('No pending title requests.');
+    return;
+  }
+  console.log(`Pending requests (${rows.length}):\n`);
+  for (const req of rows) {
+    const kind = req.titleTmdbType || '?';
+    const ep = req.episodeSeason
+      ? ` — S${req.episodeSeason}E${req.episodeNumber}${req.episodeName ? ' · ' + req.episodeName : ''}`
+      : '';
+    const year = req.titleYear ? ` (${req.titleYear})` : '';
+    console.log(`  ${req.titleTitle}${year}  [${kind}]${ep}`);
+    console.log(`      title=${req.titleId}${req.episodeId ? '  episode=' + req.episodeId : ''}`);
+    console.log(`      requested by ${req.requesterName || '?'}`);
+    console.log('');
+  }
+  console.log('To fulfill one, run:');
+  console.log('  aurasync-worker ingest <path/to/file> --title <titleId>' + (rows.some(r => r.episodeId) ? ' [--episode <episodeId>]' : ''));
+}
+
+async function cmdIngest(api, cfg, caps, filePath, titleId, episodeId) {
+  if (!filePath) {
+    console.error('Missing file path. Usage: aurasync-worker ingest <file> --title <uuid> [--episode <uuid>]');
+    process.exit(2);
+  }
+  const abs = path.resolve(filePath);
+  if (!fs.existsSync(abs)) {
+    console.error(`File not found: ${abs}`);
+    process.exit(2);
+  }
+  if (!titleId) {
+    console.error('Missing --title <titleId>. Run `aurasync-worker requests` to list options.');
+    process.exit(2);
+  }
+  const stat = fs.statSync(abs);
+  if (!stat.isFile()) {
+    console.error(`Not a regular file: ${abs}`);
+    process.exit(2);
+  }
+  console.log(`local ingest: ${abs}  (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
+  console.log(`target: title=${titleId}${episodeId ? '  episode=' + episodeId : ''}`);
+
+  // Register first so the worker is known. (If already registered from a prior
+  // poll-mode run, this is just an idempotent heartbeat.)
+  try {
+    await api.register(caps);
+  } catch (e) {
+    console.error(`register failed: ${e.message}`);
+    process.exit(3);
+  }
+
+  // Ask server to pre-claim a transcode job for this (title, episode).
+  let job;
+  try {
+    job = await api.ingestLocal({
+      titleId,
+      episodeId: episodeId || null,
+      filename: path.basename(abs),
+      bytes: stat.size,
+    });
+  } catch (e) {
+    console.error(`ingest-local failed: ${e.message}`);
+    process.exit(4);
+  }
+  console.log(`job ${job.jobId.slice(0, 8)} claimed; transcoding locally…`);
+
+  try {
+    await runLocalIngestJob(api, cfg, job, abs, caps);
+    console.log(`\n✓ Done. Title should be 'available' in the catalogue momentarily.`);
+  } catch (e) {
+    console.error(`transcode failed: ${e.message}`);
+    try { await api.fail(job.jobId, e.message, false); } catch { /* ignore */ }
+    process.exit(5);
+  }
+}
+
 // ---------- main loop ----------
 
 let shuttingDown = false;
@@ -444,6 +589,9 @@ process.on('SIGTERM', () => { log('SIGTERM — finishing current job then exitin
 
 async function main() {
   const cfg = loadConfig();
+  const args = parseArgs();
+  const sub = args.positional[0] || 'run';
+
   console.log(`\n==== AuraSync worker "${cfg.name}" ====`);
   console.log(`   server: ${cfg.server}`);
   console.log(`   tmpDir: ${cfg.tmpDir}\n`);
@@ -456,6 +604,23 @@ async function main() {
   fs.mkdirSync(cfg.tmpDir, { recursive: true });
 
   const api = makeApi(cfg);
+
+  // ----- subcommand dispatch -----
+  if (sub === 'requests' || sub === 'ls') {
+    await cmdRequests(api);
+    process.exit(0);
+  }
+  if (sub === 'ingest') {
+    // positional[0]='ingest', positional[1]=<file>
+    const filePath = args.positional[1];
+    await cmdIngest(api, cfg, caps, filePath, args.titleId, args.episodeId);
+    process.exit(0);
+  }
+  if (sub !== 'run') {
+    console.error(`Unknown subcommand: ${sub}. Run with --help.`);
+    process.exit(2);
+  }
+  // ----- default: poll/run mode -----
 
   // Register + heartbeat-every-30s regardless of job state.
   try {

@@ -36,6 +36,25 @@ node aurasync-worker.js --server https://aurasync.erpaura.ge --token aw_... --na
 node aurasync-worker.js
 ```
 
+### Two modes: **poll** vs **local ingest**
+
+The worker supports two ways of getting work:
+
+**Poll mode (default)** — the worker claims any queued transcode job from the server. Sources for poll-mode jobs live in R2 (e.g. when an admin uploaded a movie via the browser). The worker downloads the source from R2, transcodes, uploads HLS back to R2.
+
+**Local ingest** — the source file is already on the worker's disk (you downloaded it locally, or it came from a NAS/share). Skip the R2 round-trip entirely:
+
+```bash
+# See what the server is waiting for
+node aurasync-worker.js requests
+
+# Transcode + publish in one shot (no upload of the source)
+node aurasync-worker.js ingest /path/to/movie.mkv --title <titleId>
+node aurasync-worker.js ingest /path/to/s1e2.mkv --title <titleId> --episode <episodeId>
+```
+
+Local ingest never copies the source anywhere — ffmpeg reads it in place, and only the HLS output is pushed to R2. Useful when the worker and the source share a disk (same machine, or a mounted NAS).
+
 Environment variables also work: `AURASYNC_SERVER`, `AURASYNC_WORKER_TOKEN`.
 
 On boot you'll see something like:
